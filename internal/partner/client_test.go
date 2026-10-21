@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/platform"
 )
@@ -96,5 +97,80 @@ func TestQuoteHonoursCancellation(t *testing.T) {
 
 	if _, err := NewClient().Quote(ctx, p, map[string]string{}); err == nil {
 		t.Fatal("cancelled context did not interrupt the call")
+	}
+}
+
+func clientWithTimeout(timeout time.Duration) *Client {
+	client := NewClient()
+	client.timeout = timeout
+	return client
+}
+
+func TestQuoteReportsTimeoutAsPartnerError(t *testing.T) {
+	p, closeServer := testPartner(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	defer closeServer()
+
+	_, err := clientWithTimeout(50*time.Millisecond).Quote(context.Background(), p, map[string]string{})
+
+	var failure *Error
+	if !errors.As(err, &failure) {
+		t.Fatalf("error %v is not a *partner.Error", err)
+	}
+	if !failure.Timeout {
+		t.Fatalf("timeout was not flagged: %+v", failure)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error does not unwrap to context.DeadlineExceeded: %v", err)
+	}
+}
+
+func TestQuoteDoesNotFlagCancellationAsTimeout(t *testing.T) {
+	p, closeServer := testPartner(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer closeServer()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := clientWithTimeout(time.Second).Quote(ctx, p, map[string]string{})
+
+	var failure *Error
+	if !errors.As(err, &failure) {
+		t.Fatalf("error %v is not a *partner.Error", err)
+	}
+	if failure.Timeout {
+		t.Fatalf("cancellation must not be flagged as timeout: %+v", failure)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error does not unwrap to context.Canceled: %v", err)
+	}
+}
+
+func TestQuoteWithinTimeoutIsNotAnError(t *testing.T) {
+	p, closeServer := testPartner(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"quote_id":"q-1","premium_cents":1000,"currency":"BRL","coverage_cents":5000,"valid_for_seconds":300}`))
+	}))
+	defer closeServer()
+
+	quote, err := clientWithTimeout(time.Second).Quote(context.Background(), p, map[string]string{})
+	if err != nil {
+		t.Fatalf("a call within the timeout failed: %v", err)
+	}
+	if quote.QuoteID != "q-1" || quote.Partner != "partner-flaky" {
+		t.Fatalf("unexpected quote: %+v", quote)
+	}
+}
+
+func TestNewClientUsesTheTwoSecondTimeout(t *testing.T) {
+	if got := NewClient().timeout; got != 2*time.Second {
+		t.Fatalf("default timeout = %s, want 2s", got)
 	}
 }
