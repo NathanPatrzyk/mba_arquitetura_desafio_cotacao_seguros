@@ -3,6 +3,7 @@ module github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros
 go 1.25.0
 
 require (
+	github.com/sony/gobreaker/v2 v2.4.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0
 	go.opentelemetry.io/contrib/instrumentation/runtime v0.69.0
 	go.opentelemetry.io/otel v1.44.0

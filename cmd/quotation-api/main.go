@@ -30,7 +30,10 @@ func main() {
 	}
 
 	api := quotation.NewAPI(
-		quotation.NewService(cfg.Partners, partner.NewClient()),
+		quotation.NewService(
+			cfg.Partners,
+			partner.NewProtectedClient(partner.NewClient(), cfg.Partners),
+		),
 		cfg.Tenants,
 	)
 
