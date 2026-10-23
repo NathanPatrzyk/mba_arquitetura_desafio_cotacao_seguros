@@ -70,7 +70,7 @@ São escolhas deste documento, defendidas com número nas seções indicadas.
 - **D-05:** TTL do cache, dentro do teto de 24 horas. Defendida na [seção 4](#4-detalhamento-da-arquitetura).
 - **D-06:** Política de invalidação e de descarte das entradas do cache. Defendida na [seção 4](#4-detalhamento-da-arquitetura).
 - **D-07:** Tipo de fallback e a mudança no contrato de resposta. Defendida na [seção 4](#4-detalhamento-da-arquitetura).
-- **D-08:** Biblioteca de circuit breaker. Defendida na [seção 5](#5-implementação).
+- **D-08:** Biblioteca de circuit breaker (implementação própria ou `sony/gobreaker`). Defendida na [seção 5](#5-implementação).
 
 ### 1.5. Pressupostos
 
@@ -383,7 +383,7 @@ A coluna "hoje" vem da medição da [seção 3.1](#31-linha-de-base-medida), exc
 - **Hoje:** Nunca — a `partner-flaky` foi chamada em toda a carga e gerou as 80 falhas 502 ([seção 3.1](#31-linha-de-base-medida));
 - **Alvo:** Circuito aberto em ≤ 1 min de rajada;
 - **Como medir:** `partner_breaker_state` no Prometheus;
-- **Por que este número:** A rajada de nove falhas consecutivas é conhecida e medida; O breaker precisa abrir dentro dela.
+- **Por que este número:** A `partner-flaky` acumula cinco falhas antes da décima chamada e o circuito abre na quinta, em menos de 20 s (conferir no log `breaker partner-flaky: closed -> open`). A rajada de nove falhas só é exercitada se o circuito ainda estiver fechado; Com tráfego alto, uma rajada curta não abre o circuito ([D-02](#14-decisões)).
 
 **RNF-05: Isolamento entre corretoras.**
 
@@ -410,11 +410,12 @@ Cada decisão segue o formato: Contexto, opções, escolha e consequências. Os 
 #### D-02: Limiares do breaker
 
 - **Contexto:** A `partner-flaky` falha 40% das vezes em regime, com rajada determinística de nove falhas consecutivas nas sequências 49 a 57 ([enunciado do desafio](TODO:ATUALIZAR_CAMINHO_NA_REVISAO_FINAL)).
-- **Opções:** Contador de falhas consecutivas; Janela temporal; Janela deslizante por chamadas.
-- **Escolha:** Janela deslizante de 10 chamadas, com limiar de 5 falhas. O circuito abre com 5 falhas nas últimas 10 chamadas, fica aberto por 30 s, deixa passar 3 requisições de prova no meio aberto, fecha com 2 sucessos e reabre com 1 falha.
-- **Por que este par:** Falhas consecutivas com 40% de taxa nominal quase nunca chegam a 5 seguidas (0,4⁵ ≈ 1%) e não abrem em regime, por isso foram descartadas. Com 5/10, a rajada das sequências 49 a 57 abre o circuito com folga ([RNF-04](#33-requisitos-não-funcionais)), e em regime de 40% o circuito abre de vez em quando, o que é correto: 40% de erro é parceira doente. A janela por chamadas, e não por tempo, é determinística e testável no padrão de [`feasibility_test.go`](/cmd/partner-mock/feasibility_test.go), sem `sleep`.
+- **Opções:** Contador de falhas consecutivas; Janela por contagem das últimas 10 chamadas (código próprio); Janela deslizante por tempo da biblioteca.
+- **Escolha:** Janela deslizante por tempo de 30 s, em 10 buckets de 3 s, da `sony/gobreaker` ([D-08](#14-decisões)). O circuito abre quando a janela tem ao menos 5 falhas e elas são ao menos metade das chamadas concluídas (sucessos mais falhas). Fica aberto por 30 s, deixa passar 3 requisições de prova no meio aberto, fecha com 3 sucessos seguidos e reabre com 1 falha.
+- **Por que este par:** Cinco falhas é o piso de evidência: abaixo disso a parceira não é julgada. A metade das chamadas separa parceira doente de ruído. Em regime nominal (40%) a `partner-flaky` fica abaixo da metade e não abre o circuito: ela ainda entrega 6 de cada 10 prêmios, e o fallback parcial ([D-07](#14-decisões)) cobre o resto. O circuito abre quando a taxa passa de 50%, por rajada ou por piora da parceira. É reproduzível: no baseline serial a quinta falha chega antes da décima chamada, com mais da metade das chamadas falhando, e o circuito abre sempre nesse ponto. A carga seguinte, de 200 requisições em menos de 30 s, encontra o circuito aberto ([RNF-04](#33-requisitos-não-funcionais)). A janela por contagem das últimas 10 chamadas daria o mesmo resultado, mas exige código próprio de janela, já que a biblioteca guarda contadores e não a ordem das chamadas ([D-08](#14-decisões)).
 - **Aberto por 30 s:** Tempo suficiente para não martelar uma parceira durante uma rajada curta e curto o bastante para não atrasar a recuperação.
-- **Consequência ruim:** Com o circuito aberto, a parceira fica de fora das respostas completas até o circuito fechar de novo; A corretora vê cotação degradada ([RF-06](#32-requisitos-funcionais)), não silêncio.
+- **Meio aberto:** Na biblioteca, `MaxRequests` define ao mesmo tempo o número de provas e o de sucessos seguidos para fechar, por isso são 3 e 3.
+- **Consequência ruim:** Com o circuito aberto, a parceira fica de fora das respostas completas até ele fechar de novo. A corretora vê cotação degradada ([RF-06](#32-requisitos-funcionais)), não silêncio. A janela é por tempo: Com tráfego baixo, 30 s podem não reunir 5 falhas, e com tráfego alto uma rajada curta diluída não passa da metade das chamadas (9 falhas entre 120 chamadas são 7,5%) e não abre o circuito. As transições de estado são da biblioteca e dependem de tempo real nos testes.
 
 #### D-03: Timeout da chamada
 
@@ -499,7 +500,7 @@ prumo:quote:v1:tenant={X-Tenant-Id}:partner={partner}:request.coverage={request.
 
 ### 4.4. A fatia implementada, em C4 nível 3
 
-Os arquivos `internal/quotation/cache.go` e `internal/partner/breaker.go` ainda não existem: são criados por esta entrega (proposta). O mapa completo está na [seção 5](#5-implementação).
+Os arquivos `internal/quotation/cache.go` e `internal/partner/protected.go` ainda não existem: são criados por esta entrega (proposta). O mapa completo está na [seção 5](#5-implementação).
 
 ```mermaid
 flowchart LR
@@ -510,7 +511,7 @@ flowchart LR
         service["Quote Service<br/><i>internal/quotation/service.go</i>"]
         cache["Cache de prêmio<br/><i>internal/quotation/cache.go</i>"]
         client["Partner Client<br/><i>internal/partner/client.go</i>"]
-        breaker["Circuit Breaker<br/>um por parceira · <i>internal/partner/breaker.go</i>"]
+        breaker["Circuit Breaker<br/>um por parceira · <i>internal/partner/protected.go · sony/gobreaker</i>"]
     end
 
     redis[("redis<br/><i>contêiner · Redis 7</i>")]
