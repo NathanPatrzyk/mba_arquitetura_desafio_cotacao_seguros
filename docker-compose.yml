@@ -46,6 +46,7 @@ services:
       # escrever uma linha para ver o trace da requisicao no Jaeger. Para desligar: OTEL_SDK_DISABLED=true.
       OTEL_SERVICE_NAME: quotation-api
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      REDIS_ADDR: "redis:6379"
     depends_on:
       partner-slow:
         condition: service_healthy
@@ -58,6 +59,8 @@ services:
       # o que ela deveria so observar.
       otel-collector:
         condition: service_started
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
       interval: 5s

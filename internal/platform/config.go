@@ -2,6 +2,7 @@ package platform
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -12,6 +13,7 @@ type Config struct {
 	Partners  []Partner
 	Tenants   []string
 	Telemetry Telemetry
+	Redis     Redis
 }
 
 type Partner struct {
@@ -25,6 +27,10 @@ type Telemetry struct {
 	Enabled     bool
 }
 
+type Redis struct {
+	Addr string
+}
+
 const defaultEndpoints = "partner-slow=http://localhost:9001," +
 	"partner-flaky=http://localhost:9002," +
 	"partner-degrading=http://localhost:9003"
@@ -34,6 +40,8 @@ const defaultTenants = "corretora-a,corretora-b"
 const defaultCollector = "http://localhost:4317"
 
 const defaultServiceName = "quotation-api"
+
+const defaultRedisAddr = "localhost:6379"
 
 func LoadConfig(env func(string) string) (Config, error) {
 	cfg := Config{Port: text(env, "PORT", "8080")}
@@ -48,7 +56,19 @@ func LoadConfig(env func(string) string) (Config, error) {
 	if cfg.Telemetry, err = parseTelemetry(env); err != nil {
 		return Config{}, err
 	}
+	if cfg.Redis, err = parseRedis(text(env, "REDIS_ADDR", defaultRedisAddr)); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+func parseRedis(raw string) (Redis, error) {
+	addr := strings.TrimSpace(raw)
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host == "" || port == "" {
+		return Redis{}, fmt.Errorf("REDIS_ADDR: %q is not in the host:port format", addr)
+	}
+	return Redis{Addr: addr}, nil
 }
 
 func parseTelemetry(env func(string) string) (Telemetry, error) {
@@ -76,7 +96,7 @@ func parsePartners(raw string) ([]Partner, error) {
 	var partners []Partner
 	seen := map[string]bool{}
 
-	for _, item := range strings.Split(raw, ",") {
+	for item := range strings.SplitSeq(raw, ",") {
 		item = strings.TrimSpace(item)
 		if item == "" {
 			continue
@@ -107,7 +127,7 @@ func parsePartners(raw string) ([]Partner, error) {
 
 func parseTenants(raw string) ([]string, error) {
 	var tenants []string
-	for _, t := range strings.Split(raw, ",") {
+	for t := range strings.SplitSeq(raw, ",") {
 		if t = strings.TrimSpace(t); t != "" {
 			tenants = append(tenants, t)
 		}

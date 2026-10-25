@@ -15,6 +15,11 @@ import (
 
 const defaultTimeout = 2 * time.Second
 
+const (
+	SourcePartner = "partner"
+	SourceCache   = "cache"
+)
+
 type Quote struct {
 	Partner         string `json:"partner"`
 	QuoteID         string `json:"quote_id"`
@@ -22,6 +27,8 @@ type Quote struct {
 	Currency        string `json:"currency"`
 	CoverageCents   int64  `json:"coverage_cents"`
 	ValidForSeconds int64  `json:"valid_for_seconds"`
+	Source          string `json:"source,omitempty"`
+	CacheAgeSeconds *int64 `json:"cache_age_seconds,omitempty"`
 }
 
 type Client struct {
