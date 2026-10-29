@@ -297,3 +297,31 @@ func TestServiceKeepsWorkingWhenCacheIsDown(t *testing.T) {
 		t.Fatalf("partner calls = %d, want 6", quoter.total())
 	}
 }
+
+func TestCacheTreatsAnUnreadableEntryAsAMiss(t *testing.T) {
+	clock := &fixedClock{t: time.Unix(1_700_000_000, 0)}
+	store := newMemStore()
+	cache := newTestCache(t, store, clock)
+	store.data[CacheKey("corretora-a", "partner-slow", cacheTestRequest())] = []byte("not json")
+
+	if _, ok := cache.Get(context.Background(), "corretora-a", "partner-slow", cacheTestRequest()); ok {
+		t.Fatal("an entry that cannot be decoded must be a miss")
+	}
+}
+
+func TestCacheReportsZeroAgeWhenTheClockGoesBack(t *testing.T) {
+	clock := &fixedClock{t: time.Unix(1_700_000_000, 0)}
+	cache := newTestCache(t, newMemStore(), clock)
+	ctx := context.Background()
+
+	cache.Set(ctx, "corretora-a", "partner-slow", cacheTestRequest(), partner.Quote{Partner: "partner-slow"})
+	clock.Advance(-30 * time.Second)
+
+	got, ok := cache.Get(ctx, "corretora-a", "partner-slow", cacheTestRequest())
+	if !ok {
+		t.Fatal("expected a cache hit")
+	}
+	if got.CacheAgeSeconds == nil || *got.CacheAgeSeconds != 0 {
+		t.Fatalf("age must never be negative: %+v", got.CacheAgeSeconds)
+	}
+}

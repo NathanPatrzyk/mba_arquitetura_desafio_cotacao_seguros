@@ -70,6 +70,11 @@ func (a *API) quote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) respondPartnerFailure(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrNoQuotes) {
+		platform.WriteError(w, http.StatusServiceUnavailable, "no quotes available")
+		return
+	}
+
 	var failure *partner.Error
 	if errors.As(err, &failure) {
 		platform.WriteJSON(w, http.StatusBadGateway, platform.ErrorBody{

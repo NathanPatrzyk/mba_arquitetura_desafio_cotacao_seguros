@@ -175,3 +175,19 @@ func TestProtectedClientCountsTimeoutsAsFailures(t *testing.T) {
 
 	expectState(t, client, "partner-degrading", gobreaker.StateOpen)
 }
+
+func TestProtectedClientPassesThroughAPartnerWithoutBreaker(t *testing.T) {
+	known := platform.Partner{Name: "partner-slow"}
+	unknown := platform.Partner{Name: "partner-new"}
+	stub := newStubCaller(alwaysFail(&Error{Partner: "partner-new", Status: 503}))
+	client := NewProtectedClient(stub, []platform.Partner{known})
+
+	callN(client, unknown, 20)
+
+	if stub.calls["partner-new"] != 20 {
+		t.Fatalf("partner called %d times, want 20", stub.calls["partner-new"])
+	}
+	if _, ok := client.State("partner-new"); ok {
+		t.Fatal("a partner without a breaker must not report a state")
+	}
+}

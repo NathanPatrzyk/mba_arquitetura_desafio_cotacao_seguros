@@ -45,6 +45,7 @@ func main() {
 							cfg.Partners,
 					),
 					quotation.WithCache(cache),
+					quotation.WithPartialFallback(),
 			),
 			cfg.Tenants,
 	)

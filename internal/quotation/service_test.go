@@ -151,3 +151,157 @@ func serialize(t *testing.T, v any) string {
 	}
 	return string(b)
 }
+
+type scriptedQuoter struct {
+	failing map[string]error
+}
+
+func (q *scriptedQuoter) Quote(_ context.Context, p platform.Partner, _ any) (partner.Quote, error) {
+	if err := q.failing[p.Name]; err != nil {
+		return partner.Quote{}, err
+	}
+	return partner.Quote{
+		Partner:      p.Name,
+		QuoteID:      p.Name + "-id",
+		PremiumCents: defaultPremiums()[p.Name],
+		Currency:     "BRL",
+	}, nil
+}
+
+func unavailableError(name string) error {
+	return &partner.Error{Partner: name, Status: 503, Reason: "partner answered 503"}
+}
+
+func allPartnersUnavailable() map[string]error {
+	failing := make(map[string]error, len(threePartners))
+	for _, p := range threePartners {
+		failing[p.Name] = unavailableError(p.Name)
+	}
+	return failing
+}
+
+func TestPartialFallbackDropsTheFailingPartnerAndMarksTheResponseDegraded(t *testing.T) {
+	quoter := &scriptedQuoter{failing: map[string]error{"partner-flaky": unavailableError("partner-flaky")}}
+	service := NewService(threePartners, quoter, WithPartialFallback())
+
+	response, err := service.Quote(context.Background(), "corretora-a", validRequest())
+	if err != nil {
+		t.Fatalf("a missing partner must not fail the quote: %v", err)
+	}
+
+	if !response.Degraded {
+		t.Fatal("a response without one partner must be degraded")
+	}
+	if len(response.Missing) != 1 || response.Missing[0] != "partner-flaky" {
+		t.Fatalf("missing = %v, expected [partner-flaky]", response.Missing)
+	}
+	if len(response.Quotes) != 2 {
+		t.Fatalf("%d quotes, expected 2", len(response.Quotes))
+	}
+	if response.Quotes[0].Partner != "partner-degrading" || response.Quotes[1].Partner != "partner-slow" {
+		t.Fatalf("quotes are not sorted by premium: %+v", response.Quotes)
+	}
+}
+
+func TestPartialFallbackIsNotDegradedWhenEveryPartnerAnswers(t *testing.T) {
+	quoter := &scriptedQuoter{failing: map[string]error{}}
+	service := NewService(threePartners, quoter, WithPartialFallback())
+
+	response, err := service.Quote(context.Background(), "corretora-a", validRequest())
+	if err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+
+	if response.Degraded {
+		t.Fatal("a complete response must not be degraded")
+	}
+	if response.Missing == nil || len(response.Missing) != 0 {
+		t.Fatalf("missing must be an empty list, got %#v", response.Missing)
+	}
+}
+
+func TestPartialFallbackReturnsNoQuotesWhenEveryPartnerFails(t *testing.T) {
+	quoter := &scriptedQuoter{failing: allPartnersUnavailable()}
+	service := NewService(threePartners, quoter, WithPartialFallback())
+
+	_, err := service.Quote(context.Background(), "corretora-a", validRequest())
+
+	if !errors.Is(err, ErrNoQuotes) {
+		t.Fatalf("err = %v, expected ErrNoQuotes", err)
+	}
+}
+
+func TestPartialFallbackKeepsServingFromCacheWhenPartnersGoDown(t *testing.T) {
+	clock := &fixedClock{t: time.Unix(1_700_000_000, 0)}
+	quoter := &scriptedQuoter{failing: map[string]error{}}
+	service := NewService(threePartners, quoter, WithCache(newTestCache(t, newMemStore(), clock)), WithPartialFallback())
+	ctx := context.Background()
+
+	if _, err := service.Quote(ctx, "corretora-a", validRequest()); err != nil {
+		t.Fatalf("first quote: %v", err)
+	}
+
+	quoter.failing = allPartnersUnavailable()
+	clock.Advance(120 * time.Second)
+
+	response, err := service.Quote(ctx, "corretora-a", validRequest())
+	if err != nil {
+		t.Fatalf("cached quote: %v", err)
+	}
+	if response.Degraded || len(response.Quotes) != 3 {
+		t.Fatalf("a fully cached answer is a normal answer: degraded=%v quotes=%d", response.Degraded, len(response.Quotes))
+	}
+	for _, q := range response.Quotes {
+		if q.Source != partner.SourceCache {
+			t.Fatalf("quote must come from the cache: %+v", q)
+		}
+	}
+}
+
+func TestPartialFallbackCompletesAPartialAnswerWithCachedPartners(t *testing.T) {
+	clock := &fixedClock{t: time.Unix(1_700_000_000, 0)}
+	quoter := &scriptedQuoter{failing: map[string]error{"partner-flaky": unavailableError("partner-flaky")}}
+	service := NewService(threePartners, quoter, WithCache(newTestCache(t, newMemStore(), clock)), WithPartialFallback())
+	ctx := context.Background()
+
+	if _, err := service.Quote(ctx, "corretora-a", validRequest()); err != nil {
+		t.Fatalf("first quote: %v", err)
+	}
+
+	quoter.failing = allPartnersUnavailable()
+	clock.Advance(120 * time.Second)
+
+	response, err := service.Quote(ctx, "corretora-a", validRequest())
+	if err != nil {
+		t.Fatalf("second quote: %v", err)
+	}
+	if !response.Degraded || len(response.Missing) != 1 || response.Missing[0] != "partner-flaky" {
+		t.Fatalf("only partner-flaky has neither answer nor cache: degraded=%v missing=%v", response.Degraded, response.Missing)
+	}
+	if len(response.Quotes) != 2 {
+		t.Fatalf("%d quotes, expected 2", len(response.Quotes))
+	}
+	for _, q := range response.Quotes {
+		if q.Source != partner.SourceCache {
+			t.Fatalf("quote must come from the cache: %+v", q)
+		}
+	}
+}
+
+func TestPartialFallbackStopsWhenTheRequestIsCanceled(t *testing.T) {
+	quoter := &scriptedQuoter{failing: map[string]error{
+		"partner-slow":      context.Canceled,
+		"partner-flaky":     context.Canceled,
+		"partner-degrading": context.Canceled,
+	}}
+	service := NewService(threePartners, quoter, WithPartialFallback())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := service.Quote(ctx, "corretora-a", validRequest())
+
+	if err == nil || errors.Is(err, ErrNoQuotes) {
+		t.Fatalf("a canceled request must fail without being reported as no quotes, got %v", err)
+	}
+}

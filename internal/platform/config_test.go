@@ -122,3 +122,48 @@ func TestInvalidConfigFails(t *testing.T) {
 		})
 	}
 }
+
+func TestRedisAddressDefaultsToComposeEnvironment(t *testing.T) {
+	cfg, err := LoadConfig(env(nil))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	if cfg.Redis.Addr != "localhost:6379" {
+		t.Errorf("Redis address %q, want localhost:6379", cfg.Redis.Addr)
+	}
+}
+
+func TestRedisAddressReadsEnvironment(t *testing.T) {
+	cfg, err := LoadConfig(env(map[string]string{
+		"REDIS_ADDR": "redis:6379",
+	}))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	if cfg.Redis.Addr != "redis:6379" {
+		t.Errorf("Redis address %q, want redis:6379", cfg.Redis.Addr)
+	}
+}
+
+func TestInvalidRedisAddressFails(t *testing.T) {
+	cases := map[string]string{
+		"missing port":   "redis",
+		"missing host":   ":6379",
+		"missing port number": "redis:",
+		"URL instead of host port": "redis://localhost:6379",
+		"invalid address": "not a valid address",
+	}
+
+	for name, addr := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadConfig(env(map[string]string{
+				"REDIS_ADDR": addr,
+			}))
+			if err == nil {
+				t.Fatalf("LoadConfig accepted invalid REDIS_ADDR %q", addr)
+			}
+		})
+	}
+}

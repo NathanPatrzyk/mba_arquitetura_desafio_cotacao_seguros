@@ -2,12 +2,15 @@ package quotation
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"time"
 
 	"github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/partner"
 	"github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/platform"
 )
+
+var ErrNoQuotes = errors.New("no quotes available")
 
 type Quoter interface {
 	Quote(ctx context.Context, p platform.Partner, request any) (partner.Quote, error)
@@ -19,10 +22,15 @@ func WithCache(cache *QuoteCache) Option {
 	return func(s *Service) { s.cache = cache }
 }
 
+func WithPartialFallback() Option {
+	return func(s *Service) { s.partial = true }
+}
+
 type Service struct {
 	partners []platform.Partner
 	quoter   Quoter
 	cache    *QuoteCache
+	partial  bool
 }
 
 func NewService(partners []platform.Partner, quoter Quoter, options ...Option) *Service {
@@ -38,12 +46,26 @@ func (s *Service) Quote(ctx context.Context, tenant string, request Request) (Re
 	forPartner := partnerRequest{Broker: tenant, Request: request}
 
 	quotes := make([]partner.Quote, 0, len(s.partners))
+	missing := make([]string, 0, len(s.partners))
 	for _, p := range s.partners {
 		quote, err := s.quoteFrom(ctx, tenant, p, request, forPartner)
+
 		if err != nil {
-			return Response{}, err
+			if !s.partial {
+				return Response{}, err
+			}
+			if ctx.Err() != nil {
+				return Response{}, ctx.Err()
+			}
+			missing = append(missing, p.Name)
+			continue
 		}
+		
 		quotes = append(quotes, quote)
+	}
+
+	if len(quotes) == 0 {
+		return Response{}, ErrNoQuotes
 	}
 
 	sort.Slice(quotes, func(i, j int) bool {
@@ -53,6 +75,8 @@ func (s *Service) Quote(ctx context.Context, tenant string, request Request) (Re
 	return Response{
 		TenantID:  tenant,
 		Quotes:    quotes,
+		Degraded:  len(missing) > 0,
+		Missing:   missing,
 		ElapsedMs: time.Since(start).Milliseconds(),
 	}, nil
 }

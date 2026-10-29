@@ -4,64 +4,31 @@
 
 ### 1.1. Propósito
 
-O presente documento fundamenta a decisão de proteger a comunicação entre a `quotation api` e as seguradoras por meio da aplicação de tecnologias como circuit breaker, cache e fallback. Além disso, define o TTL do cache, os limiares e o escopo do breaker. O PoC que o acompanha, por sua vez, constrói e prova o que aqui será defendido.
+Este documento define a arquitetura proposta para aumentar a resiliência da `quotation-api` na comunicação com as três seguradoras parceiras, utilizando timeout, circuit breaker, cache e fallback. A Prova de Conceito (PoC) avalia os efeitos desses mecanismos sobre a disponibilidade, a latência e os custos operacionais.
 
-A decisão tem duas motivações medidas:
-
-**Disponibilidade e latência.** Hoje a plataforma consulta as parceiras em série, sem timeout, e devolve erro inteiro quando qualquer uma falha. Na execução de `make reproduce` feita para este documento ([seção 3.1](#31-linha-de-base-medida)), a carga de 200 requisições com 50 em voo terminou com p95 de 8,01 s (contra 2,04 s no baseline), 60% de sucesso e 80 respostas 502, todas originadas na `partner-flaky`. O p95 é limitado pela soma das três parceiras: no trace lento, a `partner-degrading` sozinha consumiu 6,15 s ([seção 3.1](#31-linha-de-base-medida)).
-
-**Custo.** Cada consulta custa R$ 0,04 e são 360.000 por dia útil: R$ 14.400 por dia, cerca de R$ 317.000 por mês, contra R$ 660.000 de receita. Cada consulta repetida que não precise ser comprada é dinheiro recuperável, e é essa conta que a [seção 8](#8-tecnologias-custos-e-pessoal-tco) fecha.
+A linha de base, obtida em um teste com 200 requisições e 50 em voo, apresentou p95 de 8,01 s, taxa de sucesso de 60% e 80 respostas HTTP 502. Considerando 360.000 consultas diárias ao custo de R$ 0,04 por consulta, o gasto potencial é de R$ 14.400 por dia útil. As medições e os requisitos não funcionais são detalhados na [seção 3.1](#31-linha-de-base-medida), enquanto a avaliação financeira é apresentada na [seção 8](#8-tecnologias-custos-e-pessoal-tco).
 
 ### 1.2. Escopo
 
 #### 1.2.1. Dentro do escopo
 
-A plataforma de cotação (`quotation-api`) e a fronteira dela com as três seguradoras parceiras. É nessa fronteira que este documento decide como a plataforma se protege da instabilidade das parceiras.
+O documento abrange a `quotation-api` e sua fronteira de comunicação com as três seguradoras parceiras. A proposta implementa circuit breaker, timeout nas chamadas às parceiras, cache e fallback.
 
-**Propostas implementadas.** Circuit breaker, timeout nas chamadas à parceira, cache e fallback.
+Ficam fora da implementação a paralelização das consultas e os padrões adicionais de retry com backoff, bulkhead, rate limiting e fila. Também permanecem como limitações conhecidas a ausência de limite de chamadas simultâneas por parceira, o breaker mantido na memória do processo, a invalidação do cache exclusivamente por TTL e a possibilidade de uma corretora consumir a capacidade das demais. Esses limites são detalhados na [seção 4](#4-detalhamento-da-arquitetura).
 
-**Propostas não implementadas.** Tudo o que este documento descreve e a PoC não implementa. O que inclui:
-
-- A paralelização da agregação, que sobreporia as três parceiras em vez de somá-las;
-- Os padrões citados e não implementados: retry com backoff, bulkhead, rate limiting e fila;
-- O tratamento dos quatro limites conhecidos (detalhados na [seção 4](#4-detalhamento-da-arquitetura)): ausência de limite de chamadas simultâneas por parceira, breaker em memória do processo (que não atravessa réplicas), TTL como única forma de invalidar o cache e uma corretora consumindo a capacidade das outras.
-
-#### 1.2.2. Fora do escopo
-
-- O motor de precificação das seguradoras e o CRM da corretora. A Prumo intermedia e não precifica;
-- Integração real com qualquer seguradora: As três parceiras são e continuam mocks;
-- Autenticação e Kubernetes;
-- Persistência real de auditoria. A auditoria é tratada como decisão de arquitetura e como custo ([seção 8](#8-tecnologias-custos-e-pessoal-tco));
-- Garantia transacional entre cache e parceira;
-- Interface de usuário, cadastro de corretoras, cobrança e relatórios para o corretor.
+Não fazem parte do escopo o motor de precificação das seguradoras, o CRM da corretora, a integração com seguradoras reais, a autenticação, o Kubernetes, a interface de usuário, o cadastro de corretoras, a cobrança e os relatórios. A auditoria é tratada como requisito arquitetural e custo, sem implementação de persistência real nesta proposta. Também não há garantia transacional entre o cache e as seguradoras.
 
 ### 1.3. Restrições
 
-#### 1.3.1. Tecnologias e ambiente
+As restrições tecnológicas são Go 1.25 para a API e os testes, Docker com Compose v2, Redis para cache, OpenTelemetry para instrumentação e Mermaid para os diagramas. O SDK de telemetria já está inicializado em [`internal/platform/telemetry.go`](/internal/platform/telemetry.go), com traces enviados ao Jaeger e métricas ao Prometheus por meio do Collector. As três parceiras são mocks existentes em [`cmd/partner-mock/`](/cmd/partner-mock/), e seus perfis e o ambiente definido em [`docker-compose.yml`](/docker-compose.yml) não podem ser alterados.
 
-- Go 1.25 para a API e para os testes;
-- Docker com Compose v2 como ambiente;
-- Redis como cache;
-- OpenTelemetry para a instrumentação, com o SDK já inicializado em [`internal/platform/telemetry.go`](/internal/platform/telemetry.go) (traces para o Jaeger e métricas para o Prometheus, ambos via Collector);
-- Mermaid para todo diagrama utilizado;
-- As três parceiras são mocks e não podem ser alteradas ([`cmd/partner-mock/`](/cmd/partner-mock/)), nem os perfis delas no [`docker-compose.yml`](/docker-compose.yml).
+No âmbito do negócio, cada consulta a uma parceira custa R$ 0,04, e cada cotação gera três consultas. O volume de referência é de 120.000 cotações por dia útil, durante 22 dias úteis por mês. As seguradoras honram os prêmios por até 24 horas, estabelecendo o limite comercial para reaproveitamento.
 
-#### 1.3.2. Negócio e contrato
-
-- Cada consulta a uma parceira custa R$ 0,04, e cada cotação gera três consultas;
-- Volume de referência de 120.000 cotações por dia útil, em 22 dias úteis por mês;
-- As seguradoras honram um prêmio por até 24 horas, que é o teto comercial para reaproveitar uma cotação;
-- O prêmio devolvido é sempre de uma parceira ou de um cache rastreável. A plataforma nunca calcula um valor.
-
-#### 1.3.3. Regulatórias
-
-- SUSEP: Toda cotação apresentada a um consumidor é auditável (seguradora, prêmio, corretora e instante), retida por cinco anos e não regravável. Isso vale também para cotação servida de cache ou de fallback;
-- LGPD: A corretora é controladora e a Prumo é operadora. O contrato proíbe uso cruzado de dados e exige minimização e prazo de descarte;
-- A chave de cache contém a corretora, sem exceção.
+A cotação apresentada deve ser auditável, com identificação da seguradora, prêmio, corretora e instante, e o registro deve ser retido por cinco anos sem possibilidade de regravação. Conforme os requisitos regulatórios considerados, a corretora é controladora dos dados e a Prumo é operadora, com obrigação de minimizar os dados, respeitar o prazo de descarte e impedir o uso cruzado entre corretoras. Por isso, a chave do cache deve incluir a identificação da corretora.
 
 ### 1.4. Decisões
 
-São escolhas deste documento, defendidas com número nas seções indicadas.
+As decisões arquiteturais são escolhas da solução, e não restrições impostas pelo ambiente
 
 - **D-01:** Escopo do circuit breaker (por parceira, por par parceira e corretora, ou global). Defendida na [seção 4](#4-detalhamento-da-arquitetura).
 - **D-02:** Limiares do breaker: Falhas, janela, tempo aberto e requisições do meio aberto. Defendida na [seção 4](#4-detalhamento-da-arquitetura).
@@ -74,35 +41,15 @@ São escolhas deste documento, defendidas com número nas seções indicadas.
 
 ### 1.5. Pressupostos
 
-**P-01: Volume de produção.**
+**P-01 — Volume de produção:** Assume-se um volume de 120.000 cotações por dia útil, durante 22 dias úteis por mês, conforme o [enunciado do desafio](TODO:ATUALIZAR_CAMINHO_NA_REVISAO_FINAL). Se o volume real for diferente, os custos das parceiras, o dimensionamento do Redis e o custo de auditoria deverão ser recalculados ([seção 8](#8-tecnologias-custos-e-pessoal-tco)).
 
-- **Valor:** 120.000 cotações por dia útil, em 22 dias úteis por mês;
-- **Origem:** [Enunciado do desafio](TODO:ATUALIZAR_CAMINHO_NA_REVISAO_FINAL);
-- **Se for falso:** O custo de parceiro, o dimensionamento do Redis e o custo de auditoria mudam na mesma proporção ([seção 8](#8-tecnologias-custos-e-pessoal-tco)).
+**P-02 — Comportamento das parceiras:** Assume-se que as parceiras reais se comportam como os mocks: `partner-slow` responde em aproximadamente 1.500 ms ± 200 ms, `partner-flaky` apresenta 40% de respostas HTTP 503 e `partner-degrading` degrada acima de cinco chamadas simultâneas. O pressuposto baseia-se no enunciado e nas medições da [seção 3.1](#31-linha-de-base-medida). Se não for confirmado, os limiares do breaker e o timeout deverão ser recalibrados ([seção 4](#4-detalhamento-da-arquitetura)).
 
-**P-02: As parceiras reais se comportam como os mocks.**
+**P-03 — Validade comercial:** Assume-se que o prêmio permanece válido por 24 horas, sem alteração de preço nesse período. A origem é o [enunciado do desafio](TODO:ATUALIZAR_CAMINHO_NA_REVISAO_FINAL). Se esse pressuposto for falso, uma cotação servida do cache poderá não ser honrada na venda, exigindo revisão do TTL (D-05), da arquitetura ([seção 4](#4-detalhamento-da-arquitetura)) e da gestão de mudanças ([seção 6](#6-operação-e-gestão-de-mudanças)).
 
-- **Valor:** `partner-slow` em 1.500 ms ± 200 ms, `partner-flaky` com 40% de 503, `partner-degrading` afundando acima de 5 chamadas simultâneas;
-- **Origem:** [Enunciado do desafio](TODO:ATUALIZAR_CAMINHO_NA_REVISAO_FINAL) e medição própria ([seção 3.1](#31-linha-de-base-medida));
-- **Se for falso:** Os limiares do breaker ([D-02](#14-decisões)) e o timeout ([D-03](#14-decisões)) precisam ser recalibrados ([seção 4](#4-detalhamento-da-arquitetura)).
+**P-04 — Instância única:** Assume-se que a API executa em um único contêiner `quotation-api`, conforme o [enunciado do desafio](TODO:ATUALIZAR_CAMINHO_NA_REVISAO_FINAL) e o [`docker-compose.yml`](/docker-compose.yml). Se houver múltiplas réplicas, cada processo manterá seu próprio estado do circuit breaker, podendo detectar falhas em momentos diferentes. Esse limite é detalhado na [seção 4](#4-detalhamento-da-arquitetura).
 
-**P-03: Um prêmio continua praticável durante todo o TTL.**
-
-- **Valor:** Prazo de 24 horas, sem mudança de preço antes disso;
-- **Origem:** [Enunciado do desafio](TODO:ATUALIZAR_CAMINHO_NA_REVISAO_FINAL);
-- **Se for falso:** Uma cotação servida de cache pode não ser honrada na venda. Isso é risco comercial e afeta o TTL ([D-05](#14-decisões), [seção 4](#4-detalhamento-da-arquitetura)) e a gestão de mudança ([seção 6](#6-operação-e-gestão-de-mudanças)).
-
-**P-04: A API roda como uma única instância.**
-
-- **Valor:** Um contêiner `quotation-api`;
-- **Origem:** [Enunciado do desafio](TODO:ATUALIZAR_CAMINHO_NA_REVISAO_FINAL) e [`docker-compose.yml`](/docker-compose.yml);
-- **Se for falso:** Com mais de uma réplica, cada uma aprende sozinha que a parceira caiu, porque o breaker vive em memória do processo. É um limite conhecido ([seção 4](#4-detalhamento-da-arquitetura)).
-
-**P-05: Recotação (reaproveitamento de cotações pelo cache).**
-
-- **Valor:** Assumo que 30% das cotações se repetem para a mesma corretora e o mesmo risco em até 1 hora;
-- **Origem:** O [enunciado do desafio](TODO:ATUALIZAR_CAMINHO_NA_REVISAO_FINAL) fala só em "boa parte" das consultas repetidas e não traz percentual. O valor deve ser validado com dados reais da Prumo;
-- **Se for falso:** Se for 5%, o cache não se paga e a [seção 8](#8-tecnologias-custos-e-pessoal-tco) muda de veredito. Se for maior que 30%, a economia cresce e o TTL ([D-05](#14-decisões)) pode ser revisto na [seção 4](#4-detalhamento-da-arquitetura).
+**P-05 — Repetição de cotações:** Assume-se que 30% das cotações se repetem para a mesma corretora e o mesmo risco em até uma hora. O enunciado menciona uma “boa parte” das consultas repetidas, mas não apresenta um percentual; portanto, a estimativa deve ser validada com dados reais da Prumo. Se a repetição for de apenas 5%, o cache poderá não compensar seus custos, alterando a conclusão financeira da [seção 8](#8-tecnologias-custos-e-pessoal-tco). Se for superior a 30%, a economia poderá aumentar e justificar uma revisão do TTL (D-05) na [seção 4](#4-detalhamento-da-arquitetura).
 
 ## 2. Visão geral da arquitetura
 
@@ -236,11 +183,7 @@ flowchart LR
 
 ### 2.3. Delta
 
-**Entra.** o uso do redis, contêiner que já existe no docker-compose.yml e passa a ser consultado pela quotation-api como cache de prêmio por seguradora, com a corretora na chave.
-
-**Muda.** a fronteira da quotation-api com as seguradoras ganha timeout por chamada, circuit breaker, cache e fallback; o contrato de resposta passa a admitir resposta degradada (servida do cache ou parcial), visível para a corretora.
-
-**Sai.** nada. Nenhum contêiner é removido e nenhum muda de lugar.
+Entra o uso do Redis, contêiner já existente no `docker-compose.yml`, que passa a ser consultado pela `quotation-api` como cache de prêmio por seguradora, incluindo a corretora na chave. Muda a fronteira da `quotation-api` com as seguradoras, que passa a contar com timeout por chamada, circuit breaker, cache e fallback; o contrato de resposta passa a admitir respostas degradadas, servidas do cache ou parciais, com essa condição visível para a corretora. Não sai nenhum componente: nenhum contêiner é removido ou muda de lugar.
 
 ### 2.4. A quem esta arquitetura serve
 
@@ -353,45 +296,15 @@ Os requisitos RF-01 a RF-04 saem do contrato que já existe ([`internal/quotatio
 
 A coluna "hoje" vem da medição da [seção 3.1](#31-linha-de-base-medida), exceto onde indicado. As métricas `partner_breaker_state`, `partner_breaker_transitions_total` `cache_hits_total` e `cache_misses_total` são criadas por esta entrega e têm os nomes declarados no README do processo.
 
-**RNF-01: Latência da cotação.**
+**RNF-01: Latência da cotação.** A métrica é o p95 do `POST /quotes`. Hoje, o valor é de 8,01 s sob carga ([seção 3.1](#31-linha-de-base-medida)). O alvo é ≤ 2,5 s. A medição será feita por meio de `http_server_request_duration_seconds` no Prometheus, usando a janela `[5m]` e a mesma carga de `make reproduce`. Esse limite foi definido porque a soma serial das parceiras saudáveis é de aproximadamente 1,8 s (1,5 s + 0,15 s + 0,12 s); o alvo de 2,5 s contempla o caminho completo com margem e considera o tempo de resposta aceitável para o corretor atender o cliente.
 
-- **Métrica:** p95 do `POST /quotes`;
-- **Hoje:** 8,01 s sob carga ([seção 3.1](#31-linha-de-base-medida));
-- **Alvo:** ≤ 2,5 s;
-- **Como medir:** `http_server_request_duration_seconds` no Prometheus, janela `[5m]`, mesma carga do `make reproduce`;
-- **Por que este número:** A soma serial das parceiras saudáveis é ~1,8 s (1,5 s + 0,15 s + 0,12 s); 2,5 s cobre o caminho completo com margem e é o que o corretor aguenta com o cliente na frente.
+**RNF-02: Taxa de sucesso da cotação.** A métrica é o percentual de respostas HTTP 200. Hoje, a taxa é de 60% sob carga, com 80 respostas HTTP 502 ([seção 3.1](#31-linha-de-base-medida)). O alvo é ≥ 95%. A medição será feita pelo relatório de `make reproduce`, incluindo a contagem de respostas 502. Esse limite busca evitar que a disponibilidade do produto dependa do desempenho conjunto das três parceiras e estabelece 95% como o nível mínimo esperado de sucesso.
 
-**RNF-02: Taxa de sucesso da cotação.**
+**RNF-03: Consultas compradas por cotação entregue.** As métricas são o número de consultas por cotação e a taxa de acerto do cache. Hoje, são realizadas três consultas por cotação, com hit rate de 0%, conforme o [Enunciado do desafio](TODO:ATUALIZAR_CAMINHO_NA_REVISAO_FINAL). O alvo é ≤ 2,1 consultas por cotação, correspondente a um hit rate ≥ 30%. A medição será feita pela fórmula `sum(rate(cache_hits_total[15m])) / (sum(rate(cache_hits_total[15m])) + sum(rate(cache_misses_total[15m])))`. Esse alvo utiliza o pressuposto de repetição de 30% definido em P-05 e sustenta a economia projetada na [seção 8](#8-tecnologias-custos-e-pessoal-tco).
 
-- **Métrica:** % de respostas 200;
-- **Hoje:** 60% sob carga, 80 respostas 502 ([seção 3.1](#31-linha-de-base-medida));
-- **Alvo:** ≥ 95%;
-- **Como medir:** Relatório do `make reproduce`, contagem de 502;
-- **Por que este número:** Hoje a disponibilidade é o produto das três parceiras; 95% é o piso para o produto não ser refém da pior parceira.
+**RNF-04: Detecção de parceira instável.** A métrica é o tempo até a abertura do circuito. Hoje, o circuito não abre durante o teste de referência: a `partner-flaky` é chamada durante toda a carga e contribui para as 80 respostas HTTP 502 ([seção 3.1](#31-linha-de-base-medida)). O alvo é abrir o circuito em até um minuto de falhas contínuas. A medição será feita pela métrica `partner_breaker_state` no Prometheus. A justificativa é que a `partner-flaky` acumula cinco falhas antes da décima chamada e o circuito deve abrir na quinta falha, em menos de 20 segundos. Essa transição deverá ser confirmada no log `breaker partner-flaky: closed -> open`. A ocorrência de nove falhas consecutivas só poderá ser observada se o circuito permanecer fechado; com tráfego alto, uma rajada curta pode não ser suficiente para abrir o circuito ([D-02](#14-decisoes)).
 
-**RNF-03: Consultas compradas por cotação entregue.**
-
-- **Métrica:** Nº de consultas / hit rate do cache;
-- **Hoje:** 3 consultas por cotação, hit rate 0% (fato contábil do enunciado);
-- **Alvo:** ≤ 2,1 consultas (hit rate ≥ 30%);
-- **Como medir:** `sum(rate(cache_hits_total[15m])) / (sum(rate(cache_hits_total[15m])) + sum(rate(cache_misses_total[15m])))`;
-- **Por que este número:** 30% é o pressuposto de recotação P-05; É o número que sustenta a economia da [seção 8](#8-tecnologias-custos-e-pessoal-tco).
-
-**RNF-04: Deteção de parceira instável.**
-
-- **Métrica:** Tempo até o circuito abrir;
-- **Hoje:** Nunca — a `partner-flaky` foi chamada em toda a carga e gerou as 80 falhas 502 ([seção 3.1](#31-linha-de-base-medida));
-- **Alvo:** Circuito aberto em ≤ 1 min de rajada;
-- **Como medir:** `partner_breaker_state` no Prometheus;
-- **Por que este número:** A `partner-flaky` acumula cinco falhas antes da décima chamada e o circuito abre na quinta, em menos de 20 s (conferir no log `breaker partner-flaky: closed -> open`). A rajada de nove falhas só é exercitada se o circuito ainda estiver fechado; Com tráfego alto, uma rajada curta não abre o circuito ([D-02](#14-decisões)).
-
-**RNF-05: Isolamento entre corretoras.**
-
-- **Métrica:** Cotações servidas com prêmio originado de outra corretora;
-- **Hoje:** Sem cache hoje; a única barreira é o allowlist de tenant (403);
-- **Alvo:** 0;
-- **Como medir:** Teste determinístico de chave (`make test`) + chave por extenso na [seção 4](#4-detalhamento-da-arquitetura);
-- **Por que este número:** LGPD/SUSEP: o contrato entre controladora e operadora proíbe uso cruzado; vazamento é incidente notificável à ANPD.
+**RNF-05: Isolamento entre corretoras.** A métrica é o número de cotações servidas com prêmio originado de outra corretora. Hoje, não há cache, e a única barreira é o allowlist de tenant, que retorna HTTP 403 quando o acesso não é autorizado. O alvo é zero ocorrências de uso cruzado. A medição será feita por teste determinístico da chave com `make test`, além da conferência da composição da chave descrita na [seção 4](#4-detalhamento-da-arquitetura). Esse requisito decorre das obrigações de proteção de dados e auditoria consideradas no projeto: o compartilhamento de dados entre corretoras não é permitido, e um incidente poderá exigir notificação à ANPD.
 
 ## 4. Detalhamento da arquitetura
 

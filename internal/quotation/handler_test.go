@@ -1,12 +1,14 @@
 package quotation
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/partner"
 	"github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/platform"
 )
 
@@ -116,5 +118,101 @@ func TestHealthz(t *testing.T) {
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status %d, expected 200", response.Code)
+	}
+}
+
+func TestQuotesReturnsDegradedResponseWithPartialFallback(t *testing.T) {
+	quoter := &fakeQuoter{
+		premiums: defaultPremiums(),
+		failOn:   "partner-flaky",
+	}
+
+	handler := NewAPI(
+		NewService(threePartners, quoter, WithPartialFallback()),
+		[]string{"corretora-a", "corretora-b"},
+	).Routes()
+
+	response := postQuotes(handler, "corretora-a", validBody)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status %d, expected 200: %s", response.Code, response.Body)
+	}
+
+	var body Response
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unreadable response: %v", err)
+	}
+
+	if len(body.Quotes) != 2 {
+		t.Fatalf("got %d quotes, expected 2", len(body.Quotes))
+	}
+
+	if !body.Degraded {
+		t.Error("response is not marked as degraded")
+	}
+
+	if len(body.Missing) != 1 || body.Missing[0] != "partner-flaky" {
+		t.Errorf("missing partners %v, want [partner-flaky]", body.Missing)
+	}
+
+	if body.TenantID != "corretora-a" {
+		t.Errorf("tenant_id %q, expected corretora-a", body.TenantID)
+	}
+}
+
+
+func TestQuotesReturns503WhenAllPartnersFailWithPartialFallback(t *testing.T) {
+	quoter := failingQuoter{}
+
+	handler := NewAPI(
+		NewService(threePartners, quoter, WithPartialFallback()),
+		[]string{"corretora-a", "corretora-b"},
+	).Routes()
+
+	response := postQuotes(handler, "corretora-a", validBody)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, expected 503: %s", response.Code, response.Body)
+	}
+
+	var body platform.ErrorBody
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unreadable error: %v", err)
+	}
+
+	if body.Message != "no quotes available" {
+		t.Errorf("message %q, want %q", body.Message, "no quotes available")
+	}
+}
+
+type failingQuoter struct{}
+
+func (failingQuoter) Quote(
+	ctx context.Context,
+	p platform.Partner,
+	request any,
+) (partner.Quote, error) {
+	return partner.Quote{}, &partner.Error{Partner: p.Name}
+}
+
+func TestQuotesPreserves502WithoutPartialFallback(t *testing.T) {
+	quoter := &fakeQuoter{
+		premiums: defaultPremiums(),
+		failOn:   "partner-flaky",
+	}
+
+	response := postQuotes(testAPI(quoter), "corretora-a", validBody)
+
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status %d, expected 502: %s", response.Code, response.Body)
+	}
+
+	var body platform.ErrorBody
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unreadable error: %v", err)
+	}
+
+	if body.Partner != "partner-flaky" {
+		t.Errorf("partner blamed %q, expected partner-flaky", body.Partner)
 	}
 }
