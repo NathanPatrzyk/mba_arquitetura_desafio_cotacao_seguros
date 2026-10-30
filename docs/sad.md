@@ -306,6 +306,89 @@ A coluna "hoje" vem da medição da [seção 3.1](#31-linha-de-base-medida), exc
 
 **RNF-05: Isolamento entre corretoras.** A métrica é o número de cotações servidas com prêmio originado de outra corretora. Hoje, não há cache, e a única barreira é o allowlist de tenant, que retorna HTTP 403 quando o acesso não é autorizado. O alvo é zero ocorrências de uso cruzado. A medição será feita por teste determinístico da chave com `make test`, além da conferência da composição da chave descrita na [seção 4](#4-detalhamento-da-arquitetura). Esse requisito decorre das obrigações de proteção de dados e auditoria consideradas no projeto: o compartilhamento de dados entre corretoras não é permitido, e um incidente poderá exigir notificação à ANPD.
 
+### 3.4. Resultados após a intervenção
+
+As medições foram realizadas pelo autor deste documento, em máquina própria, após o desenvolvimento do PoC, utilizando a mesma carga padrão do `make reproduce` (10 requisições de baseline e 200 com 50 em voo). Os arquivos brutos estão em [`docs/evidencias/`](/docs/evidencias/).
+
+#### Relatório do `make reproduce`
+
+```bash
+make down && make reproduce
+```
+
+```text
+baseline — 10 requests, 1 in flight, 19:50:40 UTC to 19:50:50 UTC
+  success        10 of 10 (100%)
+  latency        p50 199ms   p95 2.04s   p99 2.04s   max 2.04s
+  throughput     1.0 req/s in 10.02s
+
+load — 200 requests, 50 in flight, 19:50:50 UTC to 19:50:50 UTC
+  success        200 of 200 (100%)
+  latency        p50 6ms   p95 198ms   p99 228ms   max 229ms
+  throughput     798.0 req/s in 250ms
+
+baseline → load
+  p95 latency    2.04s → 198ms   0.1x
+  max latency    2.04s → 229ms   0.1x
+  success        100% → 100%
+  throughput     1.0 → 798.0 req/s
+```
+
+Legenda: carga com 100% de sucesso e p95 de 198 ms, favorecida pela taxa de acerto do cache próxima de 90%.
+
+#### p95 do POST /quotes (Prometheus, janela [1m])
+
+```promql
+histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket[1m])))
+```
+
+![p95 do POST /quotes no depois](/docs/evidencias/depois-p95.png)
+
+Legenda: p95 estimado pelo Prometheus durante a carga, na janela `[1m]`. O gráfico mostra as variações de tempo de resposta e o valor exato é o do relatório do teste de carga e/ou dos traces do Jaeger.
+
+#### Taxa de acerto do cache (Prometheus)
+
+```promql
+sum(cache_hits_total) / (sum(cache_hits_total) + sum(cache_misses_total))
+```
+
+![taxa de acerto do cache no depois](/docs/evidencias/depois-cache-hit.png)
+
+Legenda: taxa de acerto do cache próxima de 90%, reduzindo chamadas às seguradoras.
+
+#### Trace com circuito aberto e timeout (Jaeger, Last Hour)
+
+Export completo: [`/docs/evidencias/depois-trace-breaker-open.json`](/docs/evidencias/depois-trace-breaker-open.json).
+Resumo dos spans, com início medido a partir do span raiz:
+
+| Span / evento                                | Início | Duração | Resultado       |
+| -------------------------------------------- | -----: | ------: | --------------- |
+| `POST /quotes` (`quotation-api`)             | 0,00 s |  3,61 s | HTTP 200        |
+| `HTTP POST` → `partner-slow`                 | 0,00 s |  1,61 s | HTTP 200        |
+| `HTTP POST` → `partner-degrading`            | 1,61 s |  2,00 s | Timeout         |
+| `circuit_breaker_rejected` → `partner-flaky` | 1,61 s |       — | Circuito aberto |
+
+![trace com circuito aberto no depois](/docs/evidencias/depois-trace-breaker-open.png)
+
+Legenda: circuito aberto rejeita a chamada à `partner-flaky`, enquanto a `partner-degrading` atinge o timeout.
+
+#### make test
+
+```bash
+make test
+```
+
+```text
+ok      github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/cmd/loadgen     1.769s
+ok      github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/cmd/partner-mock        0.123s
+?       github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/cmd/quotation-api       [no test files]
+ok      github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/partner        0.013s
+ok      github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/platform       0.008s
+ok      github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/quotation      0.134s
+```
+
+Legenda: testes executados após a intervenção, com os pacotes listados passando.
+
 ## 4. Detalhamento da arquitetura
 
 Cada decisão segue o formato: Contexto, opções, escolha e consequências. Os parâmetros definidos aqui serão os mesmos do código ([seção 5](#5-implementação)) e sustentam os requisitos da [seção 3.3](#33-requisitos-não-funcionais).

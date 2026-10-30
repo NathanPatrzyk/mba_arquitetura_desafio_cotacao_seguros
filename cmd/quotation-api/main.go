@@ -32,10 +32,10 @@ func main() {
 	store := quotation.NewRedisStore(cfg.Redis.Addr)
 	defer func() { _ = store.Close() }()
 
-	cache, err := quotation.NewQuoteCache(store, quotation.CacheTTL)
-	if err != nil {
-		log.Fatalf("cache: %v", err)
-	}
+	//cache, err := quotation.NewQuoteCache(store, quotation.CacheTTL)
+	//if err != nil {
+	//	log.Fatalf("cache: %v", err)
+	//}
 
 	api := quotation.NewAPI(
 			quotation.NewService(
@@ -44,7 +44,7 @@ func main() {
 							partner.NewClient(),
 							cfg.Partners,
 					),
-					quotation.WithCache(cache),
+					//quotation.WithCache(cache),
 					quotation.WithPartialFallback(),
 			),
 			cfg.Tenants,

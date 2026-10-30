@@ -1,0 +1,313 @@
+{
+  "data": [
+    {
+      "traceID": "85faec2845138627456f12c06db86f25",
+      "spans": [
+        {
+          "traceID": "85faec2845138627456f12c06db86f25",
+          "spanID": "53dd672976b7f857",
+          "operationName": "HTTP POST",
+          "references": [
+            {
+              "refType": "CHILD_OF",
+              "traceID": "85faec2845138627456f12c06db86f25",
+              "spanID": "c6a14907937cf2e7"
+            }
+          ],
+          "startTime": 1793318500062016,
+          "duration": 2001017,
+          "tags": [
+            {
+              "key": "error",
+              "type": "bool",
+              "value": true
+            },
+            {
+              "key": "error.type",
+              "type": "string",
+              "value": "context.deadlineExceededError"
+            },
+            {
+              "key": "http.request.method",
+              "type": "string",
+              "value": "POST"
+            },
+            {
+              "key": "internal.span.format",
+              "type": "string",
+              "value": "otlp"
+            },
+            {
+              "key": "network.protocol.version",
+              "type": "string",
+              "value": "1.1"
+            },
+            {
+              "key": "otel.scope.name",
+              "type": "string",
+              "value": "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+            },
+            {
+              "key": "otel.scope.version",
+              "type": "string",
+              "value": "0.69.0"
+            },
+            {
+              "key": "otel.status_code",
+              "type": "string",
+              "value": "ERROR"
+            },
+            {
+              "key": "otel.status_description",
+              "type": "string",
+              "value": "context deadline exceeded"
+            },
+            {
+              "key": "server.address",
+              "type": "string",
+              "value": "partner-degrading"
+            },
+            {
+              "key": "server.port",
+              "type": "int64",
+              "value": 8080
+            },
+            {
+              "key": "span.kind",
+              "type": "string",
+              "value": "client"
+            },
+            {
+              "key": "url.full",
+              "type": "string",
+              "value": "http://partner-degrading:8080/quotes"
+            }
+          ],
+          "logs": [],
+          "processID": "p1",
+          "warnings": null
+        },
+        {
+          "traceID": "85faec2845138627456f12c06db86f25",
+          "spanID": "7b1fe8bc41b0da26",
+          "operationName": "HTTP POST",
+          "references": [
+            {
+              "refType": "CHILD_OF",
+              "traceID": "85faec2845138627456f12c06db86f25",
+              "spanID": "c6a14907937cf2e7"
+            }
+          ],
+          "startTime": 1793318498453188,
+          "duration": 1608757,
+          "tags": [
+            {
+              "key": "http.request.method",
+              "type": "string",
+              "value": "POST"
+            },
+            {
+              "key": "http.response.status_code",
+              "type": "int64",
+              "value": 200
+            },
+            {
+              "key": "internal.span.format",
+              "type": "string",
+              "value": "otlp"
+            },
+            {
+              "key": "network.protocol.version",
+              "type": "string",
+              "value": "1.1"
+            },
+            {
+              "key": "otel.scope.name",
+              "type": "string",
+              "value": "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+            },
+            {
+              "key": "otel.scope.version",
+              "type": "string",
+              "value": "0.69.0"
+            },
+            {
+              "key": "server.address",
+              "type": "string",
+              "value": "partner-slow"
+            },
+            {
+              "key": "server.port",
+              "type": "int64",
+              "value": 8080
+            },
+            {
+              "key": "span.kind",
+              "type": "string",
+              "value": "client"
+            },
+            {
+              "key": "url.full",
+              "type": "string",
+              "value": "http://partner-slow:8080/quotes"
+            }
+          ],
+          "logs": [],
+          "processID": "p1",
+          "warnings": null
+        },
+        {
+          "traceID": "85faec2845138627456f12c06db86f25",
+          "spanID": "c6a14907937cf2e7",
+          "operationName": "POST /quotes",
+          "references": [],
+          "startTime": 1793318498453115,
+          "duration": 3610067,
+          "tags": [
+            {
+              "key": "client.address",
+              "type": "string",
+              "value": "172.23.0.10"
+            },
+            {
+              "key": "http.request.body.size",
+              "type": "int64",
+              "value": 165
+            },
+            {
+              "key": "http.request.method",
+              "type": "string",
+              "value": "POST"
+            },
+            {
+              "key": "http.response.body.size",
+              "type": "int64",
+              "value": 299
+            },
+            {
+              "key": "http.response.status_code",
+              "type": "int64",
+              "value": 200
+            },
+            {
+              "key": "internal.span.format",
+              "type": "string",
+              "value": "otlp"
+            },
+            {
+              "key": "network.peer.address",
+              "type": "string",
+              "value": "172.23.0.10"
+            },
+            {
+              "key": "network.peer.port",
+              "type": "int64",
+              "value": 52696
+            },
+            {
+              "key": "network.protocol.version",
+              "type": "string",
+              "value": "1.1"
+            },
+            {
+              "key": "otel.scope.name",
+              "type": "string",
+              "value": "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+            },
+            {
+              "key": "otel.scope.version",
+              "type": "string",
+              "value": "0.69.0"
+            },
+            {
+              "key": "server.address",
+              "type": "string",
+              "value": "quotation-api"
+            },
+            {
+              "key": "server.port",
+              "type": "int64",
+              "value": 8080
+            },
+            {
+              "key": "span.kind",
+              "type": "string",
+              "value": "server"
+            },
+            {
+              "key": "url.path",
+              "type": "string",
+              "value": "/quotes"
+            },
+            {
+              "key": "url.scheme",
+              "type": "string",
+              "value": "http"
+            },
+            {
+              "key": "user_agent.original",
+              "type": "string",
+              "value": "Go-http-client/1.1"
+            }
+          ],
+          "logs": [
+            {
+              "timestamp": 1793318500061982,
+              "fields": [
+                {
+                  "key": "event",
+                  "type": "string",
+                  "value": "circuit_breaker_rejected"
+                },
+                {
+                  "key": "circuit_breaker.state",
+                  "type": "string",
+                  "value": "open"
+                },
+                {
+                  "key": "partner",
+                  "type": "string",
+                  "value": "partner-flaky"
+                },
+                {
+                  "key": "reason",
+                  "type": "string",
+                  "value": "open_state"
+                }
+              ]
+            }
+          ],
+          "processID": "p1",
+          "warnings": null
+        }
+      ],
+      "processes": {
+        "p1": {
+          "serviceName": "quotation-api",
+          "tags": [
+            {
+              "key": "telemetry.sdk.language",
+              "type": "string",
+              "value": "go"
+            },
+            {
+              "key": "telemetry.sdk.name",
+              "type": "string",
+              "value": "opentelemetry"
+            },
+            {
+              "key": "telemetry.sdk.version",
+              "type": "string",
+              "value": "1.44.0"
+            }
+          ]
+        }
+      },
+      "warnings": null
+    }
+  ],
+  "total": 0,
+  "limit": 0,
+  "offset": 0,
+  "errors": null
+}

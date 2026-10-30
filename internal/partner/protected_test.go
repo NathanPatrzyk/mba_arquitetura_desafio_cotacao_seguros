@@ -80,7 +80,7 @@ func TestShouldTripNeedsFiveFailuresAndHalfOfTheCompletedCalls(t *testing.T) {
 }
 
 func TestBreakerSettingsMatchTheDocumentedValues(t *testing.T) {
-	s := breakerSettings("partner-flaky")
+	s := breakerSettings("partner-flaky", nil)
 
 	if s.MaxRequests != 3 {
 		t.Errorf("MaxRequests = %d, want 3", s.MaxRequests)

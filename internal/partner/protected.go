@@ -8,6 +8,11 @@ import (
 
 	"github.com/sony/gobreaker/v2"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/platform"
 )
 
@@ -30,13 +35,24 @@ type ProtectedClient struct {
 
 func NewProtectedClient(next Caller, partners []platform.Partner) *ProtectedClient {
 	breakers := make(map[string]*gobreaker.CircuitBreaker[Quote], len(partners))
+
+	transitions, err := otel.Meter("quotation-api/partner").
+		Int64Counter(
+			"circuit_breaker.transitions",
+			metric.WithDescription("Circuit breaker state transitions by partner and state"),
+		)
+	if err != nil {
+		log.Printf("circuit breaker transitions metric unavailable: %v", err)
+		transitions = nil
+	}
+
 	for _, p := range partners {
-		breakers[p.Name] = gobreaker.NewCircuitBreaker[Quote](breakerSettings(p.Name))
+		breakers[p.Name] = gobreaker.NewCircuitBreaker[Quote](breakerSettings(p.Name, transitions))
 	}
 	return &ProtectedClient{next: next, breakers: breakers}
 }
 
-func breakerSettings(name string) gobreaker.Settings {
+func breakerSettings(name string, transitions metric.Int64Counter) gobreaker.Settings {
 	return gobreaker.Settings{
 		Name:         name,
 		MaxRequests:  breakerProbes,
@@ -47,6 +63,18 @@ func breakerSettings(name string) gobreaker.Settings {
 		IsExcluded:   isCanceled,
 		OnStateChange: func(name string, from, to gobreaker.State) {
 			log.Printf("breaker %s: %s -> %s", name, from, to)
+
+			if transitions != nil {
+				transitions.Add(
+					context.Background(),
+					1,
+					metric.WithAttributes(
+						attribute.String("partner", name),
+						attribute.String("from", from.String()),
+						attribute.String("to", to.String()),
+					),
+				)
+			}
 		},
 	}
 }
@@ -79,7 +107,29 @@ func (c *ProtectedClient) Quote(ctx context.Context, p platform.Partner, request
 	})
 
 	if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
-		return Quote{}, &Error{Partner: p.Name, Reason: "circuit open", CircuitOpen: true, Cause: err}
+		state := "open"
+		reason := "open_state"
+
+		if errors.Is(err, gobreaker.ErrTooManyRequests) {
+			state = "half-open"
+			reason = "too_many_requests"
+		}
+
+		trace.SpanFromContext(ctx).AddEvent(
+			"circuit_breaker_rejected",
+			trace.WithAttributes(
+				attribute.String("partner", p.Name),
+				attribute.String("circuit_breaker.state", state),
+				attribute.String("reason", reason),
+			),
+		)
+
+		return Quote{}, &Error{
+			Partner:     p.Name,
+			Reason:      "circuit open",
+			CircuitOpen: true,
+			Cause:       err,
+		}
 	}
 	return quote, err
 }
