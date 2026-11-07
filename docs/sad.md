@@ -36,7 +36,7 @@ São impostas pelo enunciado e pelo ambiente, e não são escolhas desta arquite
 - Redis para o cache.
 - OpenTelemetry para a instrumentação, com o SDK já inicializado em [`internal/platform/telemetry.go`](/internal/platform/telemetry.go). Os traces vão ao Jaeger e as métricas ao Prometheus, ambos via Collector.
 - Mermaid para os diagramas.
-- As três parceiras são mocks em [`cmd/partner-mock/`](/cmd/partner-mock/). Seu código e seus perfis no `docker-compose.yml` não podem ser alterados nas configurações que sustentam as evidências.
+- As três parceiras são mocks em [`cmd/partner-mock/`](/cmd/partner-mock/). Seu código e seus perfis no [`docker-compose.yml`](/docker-compose.yml) não podem ser alterados nas configurações que sustentam as evidências.
 
 **De negócio:**
 
@@ -48,6 +48,7 @@ São impostas pelo enunciado e pelo ambiente, e não são escolhas desta arquite
 
 - A cotação apresentada deve ser auditável (seguradora, prêmio, corretora e instante), retida por cinco anos e sem possibilidade de regravação (SUSEP).
 - A corretora é controladora dos dados e a Prumo é operadora (LGPD). Isso exige minimização, descarte e proibição de uso cruzado entre corretoras. Por isso a chave do cache inclui a corretora.
+- Dados pessoais só saem do país com uma das bases do art. 33 da LGPD, como uma decisão de adequação da ANPD.
 
 ### 1.4. Decisões
 
@@ -61,7 +62,7 @@ São escolhas da solução, não restrições. D-01 a D-07 são defendidas na [s
 - **D-06:** Invalidação e descarte das entradas do cache.
 - **D-07:** Tipo de fallback e mudança no contrato de resposta.
 - **D-08:** Biblioteca de circuit breaker (implementação própria ou `sony/gobreaker`).
-- **D-09:** Hospedagem (cloud em região brasileira).
+- **D-09:** Hospedagem (cloud com região primária no Brasil e região secundária de recuperação na União Europeia).
 
 ### 1.5. Pressupostos
 
@@ -74,7 +75,6 @@ São escolhas da solução, não restrições. D-01 a D-07 são defendidas na [s
 **P-04: Instância única.** Assumo que a API roda em um único contêiner `quotation-api` na PoC. Origem: [enunciado](/docs/enunciado.md) e [`docker-compose.yml`](/docker-compose.yml). Se for falso, cada réplica mantém seu próprio estado do breaker (L-02).
 
 **P-05: Repetição de cotações.** Assumo que 30% das cotações se repetem para a mesma corretora e o mesmo risco em até 1 hora. Origem: exemplo do [`docs/guia-sad.md`](/docs/guia-sad.md), porque o [enunciado](/docs/enunciado.md) fala em "boa parte" das consultas repetidas, sem percentual. Não é um dado medido e deve ser validado com dados reais da Prumo. Se a repetição for de 5%, o cache pode não se pagar e a conclusão da [seção 8](#8-tecnologias-custos-e-pessoal-tco) muda. Se for maior que 30%, a economia aumenta e o TTL (D-05) pode ser revisto.
-x
 
 ## 2. Visão geral da arquitetura
 
@@ -173,7 +173,7 @@ flowchart LR
 
 ### 2.3. Delta
 
-- **Acrescenta:** Uso do Redis, já presente no `docker-compose.yml`, como cache de prêmio por parceira, com a corretora na chave. Timeout por chamada e circuit breaker por parceira. Fallback parcial. Eventos de trace e métricas de negócio, sobre a observabilidade existente.
+- **Acrescenta:** Uso do Redis, já presente no [`docker-compose.yml`](/docker-compose.yml), como cache de prêmio por parceira, com a corretora na chave. Timeout por chamada e circuit breaker por parceira. Fallback parcial. Eventos de trace e métricas de negócio, sobre a observabilidade existente.
 - **Altera:** O contrato de resposta passa a informar a origem de cada proposta (parceira ou cache) e as parceiras ausentes quando há degradação.
 - **Remove:** Nenhum componente. Nenhum contêiner é removido ou muda de lugar.
 
@@ -275,28 +275,91 @@ Legenda: Testes que já vinham no repositório, todos passando.
 
 ### 3.2. Requisitos funcionais
 
-Os requisitos RF-01 e RF-02 são originados do contrato existente ([`internal/quotation/handler.go`](/internal/quotation/handler.go), [`internal/quotation/service.go`](/internal/quotation/service.go)). RF-03 e RF-04 decorrem do cenário de negócio e dos requisitos de rastreabilidade e auditoria. RF-05 e RF-06 são introduzidos por esta arquitetura e implementados na PoC, conforme os mecanismos descritos na [seção 4](#4-detalhamento-da-arquitetura).
+#### 3.2.1. Funcionalidades core
 
-- **RF-01:** A API rejeita cotação sem o cabeçalho `X-Tenant-Id` com HTTP 400 e mensagem `X-Tenant-Id is required`, e corretora fora de `TENANTS` com HTTP 403 e mensagem `broker not enabled on this platform`. Originado do contrato atual.
-- **RF-02:** A resposta de sucesso entrega as propostas recebidas ordenadas por `premium_cents` crescente, inclusive quando parcial. Originado do contrato atual.
-- **RF-03:** Toda proposta entregue deve corresponder a uma cotação recebida de uma parceira ou recuperada do cache, mantendo o `quote_id` original. A plataforma não calcula nem modifica o prêmio. Originado do cenário de negócio e dos requisitos de rastreabilidade.
-- **RF-04:** Toda cotação apresentada deve possuir registro auditável, contendo seguradora, prêmio, corretora e instante, com retenção por cinco anos e sem possibilidade de regravação, inclusive quando servida do cache ou fallback. É um requisito arquitetural e regulatório; a persistência de auditoria não é implementada nesta PoC.
-- **RF-05:** Quando a chave de cache corresponde a uma entrada não expirada, a API entrega o prêmio armazenado sem realizar nova consulta à seguradora, identificando a origem como `cache` e informando a idade da entrada em `cache_age_seconds`. Criado por esta arquitetura.
-- **RF-06:** Quando uma parceira falha, excede o timeout ou é rejeitada pelo circuit breaker e não existe entrada válida no cache, a API entrega as propostas disponíveis em resposta HTTP 200, marcada como degradada (`degraded: true`) e identificando as parceiras ausentes em `missing`. Quando nenhuma proposta está disponível, retorna HTTP 503 com a mensagem `no quotes available`. Criado por esta arquitetura.
+- **RF-01:** A API agrega as propostas das três parceiras e as entrega ordenadas por `premium_cents` crescente, inclusive quando a resposta é parcial. Origem: contrato atual ([`internal/quotation/service.go`](/internal/quotation/service.go)).
+- **RF-02:** Toda proposta entregue corresponde a uma cotação recebida de uma parceira ou recuperada do cache, com o `quote_id` original. A plataforma não calcula nem modifica o prêmio. Origem: cenário de negócio e rastreabilidade.
+- **RF-03:** Quando a chave de cache corresponde a uma entrada não expirada, a API entrega o prêmio armazenado sem nova consulta à seguradora, com origem `cache` e idade em `cache_age_seconds`. Criado por esta arquitetura.
+- **RF-04:** Quando uma parceira falha, excede o timeout ou é rejeitada pelo breaker e não há entrada válida no cache, a API entrega as propostas disponíveis em HTTP 200, com `degraded: true` e as parceiras ausentes em `missing`. Sem nenhuma proposta, devolve HTTP 503 com `no quotes available`. Criado por esta arquitetura.
+
+#### 3.2.2. Funcionalidades de suporte
+
+- **RF-05:** A API rejeita cotação sem `X-Tenant-Id` com HTTP 400 e `X-Tenant-Id is required`, e corretora fora de `TENANTS` com HTTP 403 e `broker not enabled on this platform`. Origem: contrato atual ([`internal/quotation/handler.go`](/internal/quotation/handler.go)).
+- **RF-06:** Toda cotação apresentada tem registro auditável (seguradora, prêmio, corretora e instante), retido por cinco anos e sem regravação, inclusive quando servida do cache ou de fallback. É requisito arquitetural e regulatório, e a persistência não é implementada na PoC.
+- **RF-07:** Respostas servidas do cache e chamadas rejeitadas pelo breaker deixam marca no trace (`cache_hit` e `circuit_breaker_rejected`) e atualizam as métricas de transição do breaker e de hit e miss, sem CPF, placa ou `quote_id`. Criado por esta arquitetura.
 
 ### 3.3. Requisitos não funcionais
 
-A coluna "hoje" utiliza as medições da [seção 3.1](#31-linha-de-base-medida), exceto quando indicado. As métricas de negócio `circuit_breaker_transitions_total`, `cache_hits_total` e `cache_misses_total` são instrumentadas pela aplicação e exportadas via OpenTelemetry. A latência por parceira reaproveita `http_client_request_duration_seconds`, com o atributo `server_address`.
+Cada requisito traz métrica, valor de hoje, alvo, medição e origem do alvo. Os valores de "hoje" vêm da [seção 3.1](#31-linha-de-base-medida).
 
-**RNF-01: Latência da cotação.** A métrica é o p95 do `POST /quotes`. Hoje, o valor é de 8,01 s sob carga ([seção 3.1](#31-linha-de-base-medida)). O alvo é ≤ 2,5 s. A medição será feita por meio de `http_server_request_duration_seconds`, no Prometheus, utilizando a janela `[1m]` e a mesma carga do `make reproduce`. Esse limite foi definido porque a soma das chamadas às parceiras saudáveis é de aproximadamente 1,8 s (1,5 s + 0,15 s + 0,12 s); o alvo de 2,5 s contempla o tempo de processamento da API e uma margem para variações de rede.
+#### 3.3.1. Características (Teorema CAP)
 
-**RNF-02: Taxa de sucesso da cotação.** A métrica é o percentual de respostas HTTP 200. Hoje, a taxa é de 60% sob carga, com 80 respostas HTTP 502 ([seção 3.1](#31-linha-de-base-medida)). O alvo é ≥ 95%. A medição será feita pelo relatório do `make reproduce`, dividindo a quantidade de respostas HTTP 200 pelo total de requisições. Esse limite busca evitar que a disponibilidade do produto dependa do desempenho conjunto das três parceiras e estabelece 95% como o nível mínimo esperado de sucesso.
+A tolerância a partições é obrigatória: as parceiras são sistemas externos instáveis e a rede até elas pode falhar. Resta escolher entre consistência e disponibilidade, e a escolha é **AP**. Sem partição, a plataforma troca consistência por latência, porque o cache responde sem consultar a parceira.
 
-**RNF-03: Consultas compradas por cotação entregue.** A métrica é o número médio de consultas às parceiras por cotação entregue e a taxa de acerto do cache. As métricas `cache_hits_total` e `cache_misses_total` são criadas por esta entrega. Hoje, são realizadas três consultas por cotação, com hit rate de 0%, pois não havia cache integrado. O alvo é ≤ 2,1 consultas por cotação, correspondente a um hit rate ≥ 30%. A medição será feita pela fórmula `sum(cache_hits_total) / (sum(cache_hits_total) + sum(cache_misses_total))`. Considerando três consultas potenciais por cotação, a média de consultas compradas é calculada por `3 × (1 - hit rate)`. Esse alvo utiliza o pressuposto de repetição de 30% definido em P-05 e sustenta a economia projetada na [seção 8](#8-tecnologias-custos-e-pessoal-tco). O hit rate observado na carga de demonstração não deve ser confundido com o percentual estimado para produção.
+**Disponibilidade (A), priorizada.** Quando uma parceira não responde, a API entrega as propostas disponíveis em vez de um erro (RF-04).
 
-**RNF-04: Detecção de parceira instável.** A métrica é o tempo entre o início de uma sequência de falhas que satisfaz os limiares do breaker e a abertura do circuito. Hoje, o circuito não existe na linha de base: a `partner-flaky` é chamada durante toda a carga e contribui para as 80 respostas HTTP 502 ([seção 3.1](#31-linha-de-base-medida)). O alvo é abrir o circuito em até um minuto após o início de uma sequência de falhas que satisfaça os critérios da D-02. A medição será feita pelo intervalo entre o início das falhas e o registro da transição `closed -> open` no log da aplicação. A rejeição das chamadas posteriores será confirmada pelo evento `circuit_breaker_rejected` no span do Jaeger ([seção 3.4](#34-resultados-após-a-intervenção)). A ocorrência de nove falhas consecutivas só provoca a abertura se a proporção de falhas na janela também satisfizer o limiar definido; com tráfego alto, sucessos intercalados podem diluir essa proporção ([D-02](#41-decisões-arquiteturais)).
+**RNF-01: Taxa de sucesso da cotação.**
 
-**RNF-05: Isolamento entre corretoras.** A métrica é o número de ocorrências de reutilização de uma entrada de cache pertencente a outra corretora. Hoje, não existe cache integrado, e a única barreira de identificação é o allowlist de tenants, que retorna HTTP 403 quando o acesso não é autorizado. O alvo é zero ocorrências de uso cruzado. A medição será feita por testes determinísticos em `make test`, verificando que a chave varia conforme o tenant e que uma corretora não recebe uma entrada armazenada para outra. Esse requisito decorre das obrigações de proteção de dados e auditoria consideradas no projeto: o compartilhamento de dados entre corretoras não é permitido, e um incidente poderá exigir notificação à ANPD.
+- **Hoje:** 60% sob carga, com 80 respostas HTTP 502.
+- **Alvo:** ≥ 95%.
+- **Medição:** Respostas HTTP 200 divididas pelo total de requisições, no relatório do `make reproduce`.
+- **Origem do alvo:** Evitar que a disponibilidade do produto seja o produto da disponibilidade das três parceiras.
+
+**Tolerância a partições (P), exigida.** O timeout e o breaker isolam a parceira lenta ou fora do ar (D-01 e D-03).
+
+**RNF-02: Detecção de parceira instável.**
+
+- **Hoje:** O circuito não existe. A `partner-flaky` é chamada durante toda a carga e contribui para as 80 respostas HTTP 502.
+- **Alvo:** Abrir o circuito em até 1 minuto após o início de uma sequência de falhas que satisfaça os critérios da D-02.
+- **Medição:** Intervalo entre o início das falhas e a transição `closed -> open`, em `circuit_breaker_transitions_total` e no log da aplicação. A rejeição das chamadas seguintes aparece no evento `circuit_breaker_rejected` no Jaeger.
+- **Origem do alvo:** Janela de 30 segundos da D-02.
+- **Observação:** Nove falhas consecutivas só abrem o circuito se a proporção de falhas na janela também atingir o limiar.
+
+**Consistência (C), relaxada de forma limitada.** O cache pode servir um prêmio defasado em relação à parceira, dentro do teto comercial de 24 h (P-03 e L-03).
+
+**RNF-03: Defasagem do prêmio servido do cache.**
+
+- **Hoje:** Não se aplica, porque não há cache integrado.
+- **Alvo:** Idade máxima de 3.600 s.
+- **Medição:** Campo `cache_age_seconds` (RF-03) e o teste `TestCache_HitMiss`, que avança o relógio 1 h + 1 s e verifica o miss.
+- **Origem do alvo:** TTL da D-05, abaixo do teto de 24 h.
+
+**Latência, preferida à consistência quando não há partição.**
+
+**RNF-04: Latência da cotação.**
+
+- **Hoje:** p95 de 8,01 s sob carga.
+- **Alvo:** ≤ 2,5 s.
+- **Medição:** p95 de `http_server_request_duration_seconds` no Prometheus, janela `[1m]`, com a carga do `make reproduce`.
+- **Origem do alvo:** A soma das parceiras saudáveis é de cerca de 1,8 s (1,5 s + 0,15 s + 0,12 s). O restante cobre o processamento da API e variações de rede.
+
+#### Outras características
+
+**RNF-05: Consultas compradas por cotação entregue.**
+
+- **Hoje:** 3 consultas por cotação, com hit rate de 0%.
+- **Alvo:** ≤ 2,1 consultas por cotação, ou seja, hit rate ≥ 30%.
+- **Medição:** `sum(cache_hits_total) / (sum(cache_hits_total) + sum(cache_misses_total))`. As consultas compradas são `3 × (1 - hit rate)`.
+- **Origem do alvo:** Pressuposto P-05, que sustenta a economia da [seção 8](#8-tecnologias-custos-e-pessoal-tco). O hit rate da carga de demonstração não descreve produção.
+
+**RNF-06: Isolamento entre corretoras.**
+
+- **Hoje:** Não há cache. A única barreira é a lista de `TENANTS`, que devolve HTTP 403.
+- **Alvo:** Zero reutilizações de entrada de cache de outra corretora.
+- **Medição:** Os testes `TestCache_TenantIsolation` e `TestCacheKey_Deterministic`, em `make test`.
+- **Origem do alvo:** LGPD. Um uso cruzado é incidente de dados pessoais, com dever de notificação à ANPD.
+
+#### 3.3.2. Dados importantes
+
+Valores aproximados, para dimensionar o que a [seção 8](#8-tecnologias-custos-e-pessoal-tco) calcula. O "usuário" é a corretora, identificada por `X-Tenant-Id`. A venda e a emissão de apólice ficam fora da plataforma.
+
+- **Usuários ativos por dia (DAU):** ≈ 300 corretoras. Origem: "algumas centenas" em produção, no enunciado. É estimativa.
+- **Requests por usuário:** ≈ 400 cotações por corretora por dia útil (120.000 ÷ 300). Origem: P-01 dividido pelo DAU estimado.
+- **Tamanho de cada request:** ≈ 0,5 kB na requisição e ≈ 1 kB na resposta, com três propostas. É estimativa a medir na PoC. O tráfego total é da ordem de 180 MB por dia útil.
+- **Leituras vs gravações:** A API só lê. No cache, cada cotação faz 3 leituras e 1 gravação por miss: Com hit rate de 30%, são 3 leituras para 2,1 gravações, ou seja, ≈ 1,4:1. Com hit rate de 90% a proporção chega a 10:1. A auditoria acrescenta 1 gravação por cotação apresentada (2.640.000 registros por mês, [seção 8.3](#83-auditoria-ano-1-e-ano-5)).
+- **Volume:** 120.000 cotações por dia útil, ou 360.000 consultas às parceiras (P-01). Em 10 horas de operação são ≈ 3,3 cotações por segundo em média.
+- **Picos:** ≈ 3 vezes a média, ou ≈ 10 cotações por segundo. É estimativa. O pico é o cenário que expõe a degradação da `partner-degrading` acima de 5 chamadas simultâneas (P-02 e L-01).
+- **Tamanho do cache:** ≈ 25.000 entradas vivas (12.000 cotações por hora × 70% únicas × 3 parceiras), na ordem de dezenas de MB.
 
 ### 3.4. Resultados após a intervenção
 
@@ -350,7 +413,7 @@ Legenda: Taxa de acerto do cache próxima de 90%, reduzindo chamadas às segurad
 
 #### Trace com circuito aberto e timeout (Jaeger, Last Hour)
 
-Export completo: [`/docs/evidencias/depois-trace-breaker-open.json`](/docs/evidencias/depois-trace-breaker-open-timeout.json).
+Export completo: [`/docs/evidencias/depois-trace-breaker-open-timeout.json`](/docs/evidencias/depois-trace-breaker-open-timeout.json).
 Resumo dos spans, com início medido a partir do span raiz:
 
 | Span / evento                                | Início | Duração | Resultado       |
@@ -385,35 +448,38 @@ Legenda: Testes executados após a intervenção, com os pacotes listados passan
 
 ### 4.1. Decisões arquiteturais
 
-Cada decisão apresenta contexto, opções, escolha e consequências. Os parâmetros definidos nesta seção correspondem à implementação da PoC e fundamentam os requisitos da [seção 3.3](#33-requisitos-não-funcionais).
+Cada decisão traz contexto, opções, escolha e consequências. Os parâmetros fundamentam os requisitos da [seção 3.3](#33-requisitos-não-funcionais).
 
-#### D-01 — Escopo do circuit breaker (um por parceira)
+#### D-01: Escopo do circuit breaker
 
-- **Contexto:** Três parceiras independentes, instáveis por natureza. Número variável de corretoras em produção.
+- **Contexto:** Três parceiras independentes e instáveis. Número variável de corretoras em produção.
 - **Opções:** Breaker global. Um por par (parceira, corretora). Um por parceira.
 - **Escolha:** Um breaker por parceira.
-- **Consequências:** A falha de uma parceira não derruba as consultas às outras duas. A alternativa global foi descartada porque uma parceira com problemas abriria o circuito para todas. A alternativa por par foi descartada porque, com diversas corretoras, cada breaker acumularia poucas chamadas e demoraria a identificar falhas, além de aumentar a cardinalidade do estado.
-- **Consequência ruim:** O breaker vive na memória do processo e não compartilha seu estado entre réplicas, conforme o limite L-02.
+- **Por quê:** A falha de uma parceira não derruba as outras duas. O global abriria o circuito para todas. O por par acumularia poucas chamadas em cada breaker, demoraria a detectar falhas e aumentaria a cardinalidade do estado.
+- **Consequência ruim:** O estado vive na memória do processo e não atravessa réplicas (L-02).
 
 #### D-02: Limiares do breaker
 
-- **Contexto:** A `partner-flaky` falha 40% das vezes em regime normal e apresenta uma rajada determinística de nove falhas consecutivas nas sequências 49 a 57 ([enunciado do desafio](README.md)).
-- **Opções:** Contador de falhas consecutivas. Janela por contagem das últimas 10 chamadas, com implementação própria. Janela deslizante por tempo, utilizando biblioteca.
-- **Escolha:** Janela deslizante de 30 segundos, dividida em 10 buckets de 3 segundos, utilizando `sony/gobreaker` (D-08). O circuito abre quando a janela registra pelo menos cinco falhas e elas representam pelo menos metade das chamadas concluídas (sucessos mais falhas). Permanece aberto por 30 segundos, permite até três requisições de prova no estado meio aberto, fecha após três sucessos consecutivos e reabre diante de uma falha nesse estado.
-- **Por que este conjunto:** Cinco falhas constituem o mínimo de evidência para avaliar a parceira. A proporção de pelo menos 50% diferencia uma condição de instabilidade de uma falha isolada. Em regime nominal, com 40% de falhas, a `partner-flaky` permanece abaixo do limiar e continua fornecendo propostas em parte das consultas; o fallback parcial (D-07) cobre as ausências. A rajada determinística de nove falhas consecutivas permite reproduzir a abertura do circuito, desde que as falhas ocorram dentro da janela e satisfaçam o limiar. A janela por contagem das últimas 10 chamadas produziria um resultado semelhante, mas exigiria implementação própria.
-- **Aberto por 30 segundos:** Tempo suficiente para evitar novas chamadas durante uma instabilidade e curto o bastante para permitir uma tentativa de recuperação.
-- **Meio aberto:** `MaxRequests` define o limite de três requisições de prova. Na biblioteca utilizada, três sucessos consecutivos fecham o circuito; qualquer falha durante esse estado provoca sua reabertura.
-- **Consequência ruim:** Com o circuito aberto, a parceira fica temporariamente fora das respostas. A corretora recebe uma cotação degradada (RF-06), não silêncio. Com tráfego baixo, a janela de 30 segundos pode não reunir cinco falhas. Com tráfego alto, uma rajada curta pode ser diluída pelo volume de chamadas bem-sucedidas e não atingir 50% de falhas.
+- **Contexto:** A `partner-flaky` falha 40% das vezes em regime normal e tem uma rajada determinística de nove falhas consecutivas nas sequências 49 a 57 ([enunciado](/docs/enunciado.md)).
+- **Opções:** Contador de falhas consecutivas. Janela por contagem das últimas 10 chamadas, com implementação própria. Janela deslizante por tempo, com biblioteca.
+- **Escolha:** Janela deslizante de 30 s, em 10 buckets de 3 s, com `sony/gobreaker` ([seção 5.1](#51-mapa-de-implementação)). O circuito abre com pelo menos 5 falhas que representem pelo menos 50% das chamadas concluídas. Fica aberto por 30 s. No meio aberto, deixa passar até 3 requisições de prova, fecha após 3 sucessos consecutivos e reabre na primeira falha.
+- **Por quê:**
+  - **5 falhas:** É o mínimo de evidência para avaliar a parceira.
+  - **50%:** Separa instabilidade de falha isolada. Em regime normal (40%), a `partner-flaky` fica abaixo do limiar e continua entregando propostas em parte das consultas, e o fallback (D-07) cobre as ausências. A rajada de nove falhas abre o circuito se ocorrer dentro da janela e atingir o limiar.
+  - **30 s aberto:** Evita novas chamadas durante a instabilidade e ainda permite tentar a recuperação.
+  - **3 requisições de prova:** Limite do `MaxRequests` da biblioteca. Três sucessos consecutivos fecham o circuito.
+  - **Janela por contagem:** Daria resultado parecido, mas exigiria implementação própria.
+  - **Consequência ruim:** Com o circuito aberto, a parceira fica fora das respostas e a corretora recebe uma cotação degradada (RF-04). Com tráfego baixo, a janela pode não reunir 5 falhas. Com tráfego alto, uma rajada curta pode ser diluída e não atingir 50%.
 
-#### D-03 — Timeout da chamada (2 segundos)
+#### D-03: Timeout da chamada
 
-- **Contexto:** A `partner-slow` responde em 1.500 ms ± 200 ms, com máximo observado de 1.700 ms. A `partner-degrading` não falha espontaneamente, mas pode aumentar sua latência até 6.000 ms sob concorrência.
+- **Contexto:** A `partner-slow` responde em 1.500 ms ± 200 ms, com máximo observado de 1.700 ms. A `partner-degrading` não falha, mas pode chegar a 6.000 ms sob concorrência.
 - **Opções:** 1.500 ms. 1.700 ms. 2.000 ms. 5.000 ms. Sem timeout.
-- **Escolha:** 2.000 ms por chamada, com o estouro contabilizado como falha para o circuit breaker.
-- **Por que:** O limite cobre a `partner-slow` saudável com margem de 300 ms e interrompe chamadas à `partner-degrading` quando sua latência ultrapassa o limite. Valores de 1.500 ms e 1.700 ms foram descartados por poderem interromper respostas saudáveis da `partner-slow`; 5.000 ms foi descartado por permitir uma espera excessiva antes da reação.
-- **Consequência ruim:** O timeout é individual por parceira, não um limite total para o `POST /quotes`. Como as consultas permanecem em série, uma cotação pode acumular até 6 segundos se as três chamadas atingirem seus respectivos timeouts antes da abertura dos circuitos.
+- **Escolha:** 2.000 ms por chamada. O estouro conta como falha para o breaker.
+- **Por quê:** Cobre a `partner-slow` saudável com 300 ms de margem e corta a `partner-degrading` quando ela afunda. 1.500 ms e 1.700 ms podem interromper respostas saudáveis. 5.000 ms espera demais antes de reagir.
+- **Consequência ruim:** O timeout é por parceira e não um limite total do `POST /quotes`. Com as consultas em série, uma cotação pode chegar a 6 s se as três atingirem o timeout antes de os circuitos abrirem.
 
-#### D-04 — Granularidade do cache e chave
+#### D-04: Granularidade do cache e chave
 
 **Chave de cache, por extenso:**
 
@@ -421,37 +487,37 @@ Cada decisão apresenta contexto, opções, escolha e consequências. Os parâme
 prumo:quote:v1:tenant={X-Tenant-Id}:partner={partner}:request.coverage={request.coverage}:driver.document={driver.document}:driver.birth_year={driver.birth_year}:vehicle.plate={vehicle.plate}:vehicle.model={vehicle.model}:vehicle.year={vehicle.year}:vehicle.value_cents={vehicle.value_cents}
 ```
 
-- **Contexto:** A corretora é identificada no cabeçalho (`X-Tenant-Id`) e os dados do risco são enviados no corpo. O método `Normalize()` de [`internal/quotation/request.go`](/internal/quotation/request.go) padroniza os componentes antes da montagem da chave.
-- **Opções:** Cache da cotação agregada. Cache do prêmio por parceira.
-- **Escolha:** Cache do prêmio por parceira.
-- **Por quê:** Permite aproveitar as propostas disponíveis mesmo quando uma parceira está indisponível, compondo respostas parciais com dados de diferentes origens. Cada proposta possui sua própria entrada e expiração.
-- **Consequência ruim:** São necessárias três entradas por cotação em vez de uma. A chave contém CPF e placa em texto, além dos demais componentes do risco. O isolamento entre corretoras é assegurado pela inclusão do tenant na chave, e o descarte dos dados pelo TTL é tratado na D-06.
+- **Contexto:** A corretora vem no cabeçalho (`X-Tenant-Id`) e o risco no corpo. O `Normalize()` de [`internal/quotation/request.go`](/internal/quotation/request.go) padroniza os componentes antes de montar a chave.
+- **Opções:** Cotação agregada. Prêmio por parceira.
+- **Escolha:** Prêmio por parceira.
+- **Por quê:** Permite compor uma resposta parcial com propostas de origens diferentes, cada uma com sua expiração.
+- **Consequência ruim:** São três entradas por cotação em vez de uma. A chave contém CPF e placa em texto. O isolamento vem do tenant na chave, e o descarte, do TTL (D-06).
 
-#### D-05 — TTL do cache (3.600 segundos)
+#### D-05: TTL do cache
 
-- **Contexto:** As seguradoras honram o prêmio por até 24 horas, conforme o enunciado do desafio. O P-05 assume 30% de recotação do mesmo risco para a mesma corretora dentro de uma hora.
-- **Opções:** 300 segundos. 3.600 segundos. 24 horas.
-- **Escolha:** 3.600 segundos (uma hora), conforme `CacheTTL` em `internal/quotation/cache.go`.
-- **Por quê:** O TTL cobre a janela de recotação assumida em P-05, sustentando o hit rate de 30% previsto no RNF-03 e na [seção 8](#8-tecnologias-custos-e-pessoal-tco). Uma hora permanece abaixo do teto comercial de 24 horas e reduz o risco de servir uma cotação desatualizada.
-- **Consequência ruim:** Cotações repetidas depois de uma hora geram novas consultas às parceiras.
+- **Contexto:** As seguradoras honram o prêmio por até 24 h. O P-05 assume 30% de repetição em até 1 h.
+- **Opções:** 300 s. 3.600 s. 24 h.
+- **Escolha:** 3.600 s, em `CacheTTL` de [`internal/quotation/cache.go`](/internal/quotation/cache.go).
+- **Por quê:** Cobre a janela de repetição do P-05, que sustenta o hit rate de 30% (RNF-05) e a [seção 8](#8-tecnologias-custos-e-pessoal-tco). Fica abaixo do teto de 24 h e reduz o risco de servir cotação defasada. 300 s cobriria só parte da janela de repetição. 24 h encostaria no teto comercial sem dado que o justifique.
+- **Consequência ruim:** Cotações repetidas depois de 1 h geram novas consultas às parceiras.
 
-#### D-06 — Invalidação e descarte das entradas do cache
+#### D-06: Invalidação e descarte das entradas
 
-- **Contexto:** No cenário da PoC, não existe um mecanismo de notificação de alteração de preços que permita invalidar entradas antecipadamente. O Redis do ambiente é efêmero, sem persistência AOF ou RDB, conforme a configuração do `docker-compose.yml`.
-- **Escolha:** Invalidação exclusivamente por TTL de uma hora. O Redis aplica o prazo de expiração na gravação de cada entrada, e a aplicação também verifica sua idade antes de utilizá-la. As entradas deixam de ser válidas após esse período e são perdidas quando o Redis é reiniciado. O prazo de permanência dos dados pessoais na chave do cache fica limitado ao mesmo TTL.
-- **Consequência ruim:** Uma alteração na tabela de preços durante a validade da entrada poderá fazer com que um prêmio desatualizado seja servido por até uma hora, com risco de não ser honrado na venda (limite conhecido L-03, [seção 4.3](#43-limites-conhecidos)).
+- **Contexto:** Não há notificação de alteração de preço. O Redis do ambiente é efêmero, sem AOF nem RDB ([`docker-compose.yml`](/docker-compose.yml)).
+- **Escolha:** Invalidação só por TTL de 1 h. O Redis aplica a expiração na gravação e a aplicação confere a idade antes de usar a entrada. As entradas somem após 1 h ou quando o Redis reinicia, e o dado pessoal na chave fica limitado ao mesmo prazo. Com o breaker aberto, só entradas dentro do TTL são servidas.
+- **Consequência ruim:** Uma mudança de preço pode ser servida por até 1 h, com risco de não ser honrada na venda (L-03).
 
 #### D-07: Fallback parcial
 
-- **Contexto:** Hoje uma parceira falhando aborta a requisição inteira com 502 ([seção 3.1](#31-linha-de-base-medida): 80 respostas 502 numa carga).
+- **Contexto:** Hoje uma parceira falhando aborta a cotação inteira com HTTP 502 (80 respostas 502 em uma carga, [seção 3.1](#31-linha-de-base-medida)).
 - **Opções:** Resposta parcial. Cotação anterior agregada. Recusa explícita.
-- **Escolha:** Fallback com resposta parcial. Uma entrada válida no cache é considerada um acerto normal ([RF-05](#32-requisitos-funcionais)), não uma degradação. Quando uma parceira falha, excede o timeout ou é rejeitada pelo breaker e não existe entrada válida no cache, ela é identificada como ausente. A API entrega as propostas disponíveis, ordenadas por prêmio ([RF-02](#32-requisitos-funcionais)), e declara a degradação. Quando nenhuma proposta está disponível, retorna HTTP 503 com a mensagem `no quotes available`.
-- **Alternativas descartadas:** Cotação anterior agregada, porque perderia a possibilidade de combinar propostas frescas e armazenadas individualmente por parceira. Recusa explícita sempre, porque descartaria propostas válidas das demais seguradoras.
-- **Consequência ruim:** A corretora pode receber uma cotação sem a proposta de uma ou mais parceiras e, portanto, sem conhecer todas as opções disponíveis no mercado. A ausência fica explícita na resposta para permitir a tomada de decisão.
+- **Escolha:** Resposta parcial. Uma entrada válida no cache é acerto normal (RF-03), não degradação. Quando uma parceira falha, estoura o timeout ou é rejeitada pelo breaker e não há entrada válida, ela entra em `missing`. A API entrega as propostas disponíveis, ordenadas por prêmio (RF-01), com `degraded: true`. Sem nenhuma proposta, devolve HTTP 503 com `no quotes available`.
+- **Como a corretora sabe:** Pelo `degraded: true` e pelo `missing`, e pela origem e idade de cada proposta em `cache_age_seconds` (RF-03).
+- **Como segue auditável:** A proposta mantém o `quote_id` original (RF-02) e entra no registro de auditoria (RF-06).
+- **Alternativas descartadas:** A cotação anterior agregada perderia a combinação de propostas frescas e em cache por parceira. A recusa explícita descartaria propostas válidas das demais seguradoras.
+- **Consequência ruim:** A corretora pode não ver todas as opções do mercado. A ausência é explícita na resposta.
 
 ### 4.2. A fatia implementada, em C4 nível 3
-
-O diagrama apresenta os componentes da `quotation-api` envolvidos na implementação do cache, circuit breaker, timeout e fallback, além das dependências externas utilizadas pela solução. Conforme detalhado na [seção 5](#5-implementação).
 
 ```mermaid
 flowchart LR
@@ -460,13 +526,12 @@ flowchart LR
     subgraph api["quotation-api · Go 1.25 · contêiner"]
         handler["Handler HTTP<br/><i>internal/quotation/handler.go</i>"]
         service["Quote Service<br/><i>internal/quotation/service.go</i>"]
-        cache["Quote Cache<br/><i>internal/quotation/cache.go</i>"]
-        redisstore["RedisStore<br/><i>implementação de Store</i>"]
-        breaker["Protected Client<br/><i>internal/partner/protected.go</i><br/>Circuit breaker por parceira"]
+        cache["Quote Cache<br/><i>internal/quotation/cache.go · redis_store.go</i>"]
+        breaker["ProtectedClient<br/><i>internal/partner/protected.go</i><br/>Circuit breaker por parceira"]
         client["Partner Client<br/><i>internal/partner/client.go</i><br/>Timeout de 2 s"]
     end
 
-    redis[("Redis 7<br/><i>contêiner</i>")]
+    redis[("redis<br/><i>Redis 7 · contêiner</i>")]
 
     subgraph seguradoras["Seguradoras parceiras · sistemas externos"]
         slow["partner-slow"]
@@ -476,50 +541,43 @@ flowchart LR
 
     corretora -->|"POST /quotes<br/>HTTP/JSON · X-Tenant-Id"| handler
     handler -->|"Request validada<br/>chamada in-process"| service
-
     service -->|"Consulta entrada<br/>chamada in-process"| cache
-    cache -->|"Store.Get / Store.Set<br/>chamada in-process"| redisstore
-    redisstore -->|"Leitura e gravação<br/>RESP · TCP :6379"| redis
-
+    cache -->|"Leitura e gravação<br/>RESP · TCP :6379"| redis
     service -->|"Cache miss<br/>Quote(ctx, parceira)"| breaker
     breaker -->|"Chamada permitida<br/>delegação in-process"| client
     breaker -.->|"Circuito aberto<br/>rejeição sem chamada HTTP"| service
-
-    client -->|"POST /quotes<br/>HTTP/JSON · timeout 2 s"| slow
-    client -->|"POST /quotes<br/>HTTP/JSON · timeout 2 s"| flaky
-    client -->|"POST /quotes<br/>HTTP/JSON · timeout 2 s"| degrading
-
+    client -->|"POST /quotes<br/>HTTP/JSON · timeout 2 s"| seguradoras
     service -->|"Response normal ou parcial<br/>chamada in-process"| handler
     handler -->|"HTTP 200 ou HTTP 503<br/>JSON"| corretora
 ```
 
-O `Quote Service` consulta o cache individualmente para cada parceira. Quando encontra uma entrada válida, utiliza a proposta armazenada sem chamar o circuit breaker ou a seguradora. Em caso de cache miss, a chamada passa pelo `ProtectedClient`, que permite sua execução conforme o estado do circuito ou a rejeita quando ele está aberto. O `Partner Client` realiza a comunicação HTTP com timeout de dois segundos por chamada.
+O `Quote Service` consulta o cache por parceira. Em acerto, usa a proposta armazenada sem chamar o breaker nem a seguradora. Em miss, a chamada passa pelo `ProtectedClient`, que a executa conforme o estado do circuito ou a rejeita se ele está aberto. O `Partner Client` faz a chamada HTTP, com timeout de 2 s.
 
-As marcações de observabilidade complementam a representação: uma resposta servida do cache registra o evento `cache_hit`, enquanto uma chamada rejeitada pelo circuit breaker registra `circuit_breaker_rejected` no trace. As métricas de cache e de transições do breaker são exportadas pelo OpenTelemetry. CPF, placa e `quote_id` não são utilizados como atributos dos eventos ou métricas de negócio instrumentados nesta implementação.
+A resposta servida do cache registra o evento `cache_hit`, e a chamada rejeitada registra `circuit_breaker_rejected` no trace (RF-07). CPF, placa e `quote_id` não são usados como atributos de evento ou métrica.
 
 ### 4.3. Limites conhecidos
 
-Os quatro limites abaixo são conhecidos e permanecem fora do escopo desta entrega.
+Os quatro limites abaixo são conhecidos e ficam fora do escopo desta entrega.
 
-#### L-01 — Ausência de limite de chamadas simultâneas por parceira
+#### L-01: Ausência de limite de chamadas simultâneas por parceira
 
-- **Gatilho:** Rajadas de carga ou indisponibilidade do Redis, que provoca cache misses e aumenta as consultas às seguradoras. A concorrência sobre a `partner-degrading` pode ultrapassar cinco chamadas simultâneas.
-- **Efeito na corretora:** A latência aumenta até que o timeout interrompa as chamadas excedentes, podendo elevar a quantidade de cotações degradadas.
+- **Gatilho:** Rajada de carga ou indisponibilidade do Redis, que gera misses e mais consultas às seguradoras. A concorrência sobre a `partner-degrading` pode passar de 5 chamadas simultâneas.
+- **Efeito na corretora:** A latência sobe até o timeout cortar as chamadas excedentes, e mais cotações saem degradadas.
 
-#### L-02 — Breaker mantido na memória do processo
+#### L-02: Breaker mantido na memória do processo
 
 - **Gatilho:** Escalar a `quotation-api` para mais de uma réplica.
-- **Efeito na corretora:** Cada réplica mantém seu próprio estado do circuit breaker e pode detectar falhas em momentos diferentes. Uma réplica pode continuar consultando uma parceira enquanto outra já abriu seu circuito, aumentando o número de chamadas e produzindo comportamentos distintos entre requisições.
+- **Efeito na corretora:** Cada réplica mantém seu próprio breaker e detecta falhas em momentos diferentes. Uma pode continuar chamando uma parceira enquanto outra já abriu o circuito, o que aumenta as chamadas e gera comportamentos diferentes entre requisições.
 
-#### L-03 — TTL como única forma de invalidar o cache
+#### L-03: TTL como única forma de invalidar o cache
 
-- **Gatilho:** Alteração na tabela de preços de uma seguradora durante a janela de validade de uma entrada do cache.
-- **Efeito na corretora:** Uma proposta desatualizada pode ser servida por até uma hora, com risco de não ser honrada na venda. Não existe mecanismo de invalidação antecipada por alteração de preço.
+- **Gatilho:** Mudança na tabela de preços de uma seguradora dentro da validade de uma entrada.
+- **Efeito na corretora:** Uma proposta defasada pode ser servida por até 1 h, com risco de não ser honrada na venda. Não há invalidação antecipada.
 
-#### L-04 — Ausência de rate limiting por corretora
+#### L-04: Ausência de rate limiting por corretora
 
 - **Gatilho:** Uma corretora gera volume anormal de requisições.
-- **Efeito na corretora:** O consumo de recursos compartilhados pode elevar a latência de todas as corretoras, prejudicando o p95 e a disponibilidade da plataforma.
+- **Efeito na corretora:** O consumo dos recursos compartilhados sobe a latência de todas as corretoras e afeta o p95 e a disponibilidade da plataforma.
 
 ## 5. Implementação
 
@@ -529,36 +587,36 @@ Cada mecanismo aponta para o arquivo onde nasce, a biblioteca usada e o teste qu
 
 **Timeout por chamada (D-03).**
 
-- **Arquivo:** `internal/partner/client.go`.
+- **Arquivo:** [`internal/partner/client.go`](/internal/partner/client.go).
 - **Biblioteca:** `net/http`, com `http.Client{Timeout: 2 * time.Second}`.
-- **Teste:** `TestClient_Timeout` em `internal/partner/client_test.go`.
+- **Teste:** `TestClient_Timeout` em [`internal/partner/client_test.go`](/internal/partner/client_test.go).
 
 **Circuit breaker por parceira (D-01, D-02).**
 
-- **Arquivo:** `internal/partner/protected.go`.
+- **Arquivo:** [`internal/partner/protected.go`](/internal/partner/protected.go).
 - **Biblioteca:** `github.com/sony/gobreaker/v2` (D-08).
-- **Testes:** `TestBreaker_OpensOnBurst` (nove falhas consecutivas abrem o circuito) e `TestBreaker_RecoversAfterThreeSuccesses` (três sucessos no meio aberto fecham o circuito), em `internal/partner/protected_test.go`.
+- **Testes:** `TestBreaker_OpensOnBurst` (nove falhas consecutivas abrem o circuito) e `TestBreaker_RecoversAfterThreeSuccesses` (três sucessos no meio aberto fecham o circuito), em [`internal/partner/protected_test.go`](/internal/partner/protected_test.go).
 
 **Cache por parceira e chave (D-04, D-05, D-06).**
 
-- **Arquivos:** `internal/quotation/cache.go` (inclui `CacheKey()`) e `internal/quotation/redis_store.go`.
+- **Arquivos:** [`internal/quotation/cache.go`](/internal/quotation/cache.go) (inclui `CacheKey()`) e [`internal/quotation/redis_store.go`](/internal/quotation/redis_store.go).
 - **Biblioteca:** `github.com/redis/go-redis/v9`.
-- **Testes:** `TestCache_HitMiss`, `TestCache_TenantIsolation` e `TestCacheKey_Deterministic`, em `internal/quotation/cache_test.go`.
+- **Testes:** `TestCache_HitMiss`, `TestCache_TenantIsolation` e `TestCacheKey_Deterministic`, em [`internal/quotation/cache_test.go`](/internal/quotation/cache_test.go).
 
-**Fallback parcial e ordenação (D-07, RF-02, RF-06).**
+**Fallback parcial e ordenação (D-07, RF-01, RF-04).**
 
-- **Arquivo:** `internal/quotation/service.go`, em `Quote()` e `quoteFrom()`.
+- **Arquivo:** [`internal/quotation/service.go`](/internal/quotation/service.go), em `Quote()` e `quoteFrom()`.
 - **Biblioteca:** Nenhuma, apenas `sort` da biblioteca padrão.
-- **Testes:** `TestService_PartialFallback_OnePartnerFails`, `TestService_AllFail_Returns503` e `TestService_QuotesSortedByPremium`, em `internal/quotation/service_test.go`.
+- **Testes:** `TestService_PartialFallback_OnePartnerFails`, `TestService_AllFail_Returns503` e `TestService_QuotesSortedByPremium`, em [`internal/quotation/service_test.go`](/internal/quotation/service_test.go).
 
-**Instrumentação.**
+**Instrumentação (RF-07).**
 
-- **Arquivos:** `internal/partner/protected.go` (breaker) e `internal/quotation/cache.go` (cache).
+- **Arquivos:** [`internal/partner/protected.go`](/internal/partner/protected.go) (breaker) e [`internal/quotation/cache.go`](/internal/quotation/cache.go) (cache).
 - **Biblioteca:** `go.opentelemetry.io/otel/metric` e `go.opentelemetry.io/otel/trace`.
 - **Métricas:** `circuit_breaker.transitions` (atributos `partner`, `from`, `to`), `cache.hits` e `cache.misses` (atributos `tenant_id`, `partner`). No Prometheus aparecem como `circuit_breaker_transitions_total`, `cache_hits_total` e `cache_misses_total`.
 - **Eventos de trace:** `circuit_breaker_rejected` e `cache_hit`, sem CPF, placa ou `quote_id`.
-- **Latência por parceira:** Reaproveita `http_client_request_duration_seconds` (atributo `server_address`), emitida pelo `otelhttp` já configurado em `internal/platform/telemetry.go`.
-- **Testes:** `TestBreaker_EmitsTransitionMetric`, `TestBreaker_RecordsRejectedEvent`, `TestCache_EmitsHitMissMetrics` e `TestCache_RecordsHitEvent`.
+- **Latência por parceira:** Reaproveita `http_client_request_duration_seconds` (atributo `server_address`), emitida pelo `otelhttp` já configurado em [`internal/platform/telemetry.go`](/internal/platform/telemetry.go).
+- **Testes:** `TestBreaker_EmitsTransitionMetric`, `TestBreaker_RecordsRejectedEvent`, `TestCache_EmitsHitMissMetrics` e `TestCache_RecordsHitEvent`, nos arquivos de teste de `protected.go` e `cache.go`.
 
 #### Biblioteca de circuit breaker
 
@@ -572,19 +630,42 @@ Cada mecanismo aponta para o arquivo onde nasce, a biblioteca usada e o teste qu
 
 #### Hospedagem
 
-- **Contexto:** A corretora é controladora e a Prumo é operadora (LGPD). A auditoria exige retenção de 5 anos sem regravação (SUSEP, RF-04). A disponibilidade é promessa comercial.
-- **Opções:** Cloud em região brasileira. On-premise. Híbrido.
-- **Escolha:** Cloud pública com região no Brasil (ex.: AWS `sa-east-1`, GCP `southamerica-east1`, Azure `Brazil South`), hospedando a `quotation-api`, o Redis e a observabilidade.
+- **Contexto:** A corretora é controladora e a Prumo é operadora (LGPD). A auditoria exige retenção de 5 anos sem regravação (SUSEP, RF-06). A disponibilidade é promessa comercial. A AWS tem uma única região no Brasil (`sa-east-1`), então a perda da região exige um secundário emxc\za\ outro país ou em outro fornecedor.
+- **Opções:** Cloud com região primária no Brasil e secundária no exterior. Cloud com as duas regiões no Brasil, em outro fornecedor. On-premise. Híbrido.
+- **Escolha:** Cloud pública (AWS) com região primária em São Paulo (`sa-east-1`, multi-AZ) e região secundária de recuperação na União Europeia (ex.: Irlanda, `eu-west-1`, ou Espanha, `eu-south-2`). Hospeda a `quotation-api`, o Redis e a observabilidade.
 - **Por quê:**
-  1. **Residência (LGPD):** CPF e placa ficam em território nacional, sem transferência internacional de dados pessoais.
-  2. **Auditoria (SUSEP):** A retenção imutável de 5 anos se apoia em armazenamento gerenciado com bloqueio de retenção, de tipo S3 Object Lock em modo Compliance / WORM.
-  3. **Recuperação:** Zonas de disponibilidade independentes na mesma região sustentam o cenário (c) da [seção 7](#7-recuperação-de-desastres) sem segundo site físico.
-- **Alternativa descartada, on-premise:**
-  - **Regulatório:** A organização assume sozinha a retenção imutável, a segregação entre corretoras e o descarte de dados.
-  - **Financeiro:** Exige hardware e um segundo site para o cenário (c). Custo mensal: ~R$ 15.000+/mês on-premise, contra ~R$ 2.200/mês na cloud ([seção 8.2](#82-infraestrutura-acrescentada)).
-- **Alternativa descartada, híbrido:** Duplica a operação sem ganho regulatório, porque a região brasileira já atende a residência de dados. Custo adicional: ~R$ 12.800/mês a mais que a cloud.
-- **Consequência ruim:** Dependência do fornecedor e custo variável com o uso. A região única não cobre a perda da região: Exige uma segunda região nacional, porém não há segunda região AWS oficial no Brasil. Multi-AZ em sa-east-1 + GCP southamerica-east1 como secundário ([seção 7.4](#74-cenário-c-perda-do-site-ou-da-região)).
-- **Custo:** Redis gerenciado, retenção de traces e métricas e armazenamento de auditoria ([seção 8](#8-tecnologias-custos-e-pessoal-tco)).
+  1. **Residência (LGPD):** Em operação normal, CPF e placa são tratados e guardados no Brasil.
+  2. **Auditoria (SUSEP):** A retenção imutável de 5 anos se apoia no S3 Object Lock em modo Compliance (WORM). O registro de auditoria (RF-06) contém seguradora, prêmio, corretora e instante, sem CPF nem placa.
+  3. **Recuperação:** As zonas de disponibilidade cobrem a falha de uma zona. A região secundária cobre a perda da região, cenário (c) da [seção 7](#7-recuperação-de-desastres).
+  4. **Base legal da transferência:** A União Europeia é reconhecida como adequada pela ANPD ([Resolução CD/ANPD nº 32/2026](https://legismap.com.br/leis-e-normas/resolucao-anpd-n-032-de-26-01-2026)), com base no art. 33, I da LGPD. Em regra, isso dispensa outros mecanismos, como as cláusulas-padrão contratuais.
+  5. **Minimização:** Em operação normal só o registro de auditoria é replicado para a região secundária, e o Redis não é replicado. Os dados pessoais passam a ser tratados na região secundária apenas durante um failover.
+- **Alternativas descartadas:**
+  - **Secundário em país sem adequação (ex.: EUA):** Exigiria as cláusulas-padrão contratuais da [Resolução CD/ANPD nº 19/2024](https://legismap.com.br/leis-e-normas/resolucao-cd-anpd-n-019-de-23-08-2024), assinadas com o importador sem alteração do texto.
+  - **Secundário no Brasil, em outro fornecedor:** Azure (Brazil South e Brazil Southeast) ou Oracle (São Paulo e Vinhedo) mantêm tudo no país, mas exigem uma segunda stack, outro contrato e outra operação.
+  - **On-premise:** Exige hardware próprio, dois sites geograficamente
+    separados, infraestrutura de armazenamento imutável, conectividade
+    redundante e operação dos ambientes. Como referência pública, o
+    colocation de 10U em Osasco custa ≈ R$ 3.500/mês e um quarter rack
+    no Rio de Janeiro parte de ≈ R$ 1.499/mês. Quatro servidores Dell
+    PowerEdge R360, a partir de R$ 21.998 cada, representam ≈ R$ 2.444
+    mensais quando amortizados em 36 meses. O subtotal de referência
+    é ≈ R$ 7.443/mês, sem storage imutável, conectividade entre sites,
+    licenças, suporte e operação. O custo completo depende de
+    dimensionamento e cotação comercial.
+  - **Híbrido:** Mantém a operação principal na cloud e utiliza um site
+    físico no Brasil para recuperação de desastres. Considerando dois
+    servidores Dell PowerEdge R360 no site secundário e um quarter rack
+    no Rio de Janeiro, o custo adicional de referência é ≈ R$ 2.721/mês,
+    incluindo amortização do hardware em 36 meses. Não inclui
+    conectividade, armazenamento imutável, replicação, segurança
+    de rede, suporte ou operação. A contingência nacional evita a
+    transferência internacional de dados durante o failover, embora
+    essa transferência também possa ser realizada legalmente para
+    destinos reconhecidos como adequados pela ANPD. O custo completo
+    precisa ser validado por cotação.
+- **Consequência ruim:** Dependência do fornecedor e custo variável com o uso. Durante um failover, dados pessoais são tratados fora do país. Isso exige previsão no contrato com as corretoras, que são as controladoras. A adequação simplifica o mecanismo de transferência, mas não dispensa os princípios, a segurança e os direitos dos titulares da LGPD. Os dados tratados na União Europeia também ficam sujeitos ao GDPR.
+- **Atenção à SUSEP:** Se a contratante for supervisionada, a contratação de nuvem segue a [Circular SUSEP nº 638/2021](https://legismap.com.br/leis-e-normas/circular-susep-n-638-de-27-07-2021), alterada pela Resolução SUSEP nº 90/2026, que considera os países e regiões onde os dados são tratados. Confirmar com o jurídico.
+- **Custo:** Redis gerenciado, retenção de traces e métricas, armazenamento de auditoria e réplica na região secundária ([seção 8](#8-tecnologias-custos-e-pessoal-tco)).
 
 ## 6. Operação e gestão de mudanças
 
@@ -596,7 +677,7 @@ Três sinais, todos já emitidos pela aplicação ([seção 5](#5-implementaçã
 - **Hit rate do cache:** `sum(cache_hits_total) / (sum(cache_hits_total) + sum(cache_misses_total))`.
 - **Latência por parceira:** `http_client_request_duration_seconds`, agrupada por `server_address`.
 
-Não há outros painéis. Cada sinal sustenta um requisito da [seção 3.3](#33-requisitos-não-funcionais): RNF-04, RNF-03 e RNF-01.
+Não há outros painéis. Cada sinal sustenta um requisito da [seção 3.3](#33-requisitos-não-funcionais): RNF-02, RNF-05 e RNF-04.
 
 ### 6.2. Alertas
 
@@ -607,17 +688,17 @@ Não há outros painéis. Cada sinal sustenta um requisito da [seção 3.3](#33-
 
 - **A-02: Hit rate abaixo do pressuposto.**
   - **Métrica:** Hit rate do cache.
-  - **Limiar:** < 30% por 15 min, fora do aquecimento após reinício do Redis. O valor vem do RNF-03 e do P-05.
-  - **Ação:** Verificar o Redis. Se ele reiniciou, tratar como o cenário (a) da [seção 7](#7-recuperação-de-desastres). Se está saudável, o pressuposto P-05 pode estar errado: abrir revisão do TTL ([seção 6.4](#64-gestão-de-mudanças-ttl-do-cache)).
+  - **Limiar:** < 30% por 15 min, fora do aquecimento após reinício do Redis. O valor vem do RNF-05 e do P-05.
+  - **Ação:** Verificar o Redis. Se ele reiniciou, tratar como o cenário (a) da [seção 7](#7-recuperação-de-desastres). Se está saudável, o pressuposto P-05 pode estar errado: Abrir revisão do TTL ([seção 6.4](#64-gestão-de-mudanças-ttl-do-cache)). Abaixo de ≈ 7% o cache deixa de se pagar ([seção 8.5](#85-veredito)).
 
 - **A-03: Latência da cotação acima do alvo.**
   - **Métrica:** p95 de `http_server_request_duration_seconds`, janela `[1m]`.
-  - **Limiar:** > 2,5 s por 5 min. O valor vem do RNF-01.
+  - **Limiar:** > 2,5 s por 5 min. O valor vem do RNF-04.
   - **Ação:** Identificar a parceira responsável em `http_client_request_duration_seconds` por `server_address` e seguir o runbook se o breaker dela estiver aberto.
 
 ### 6.3. Runbook: Breaker da `partner-degrading` aberto
 
-**Sintoma:** A-01 disparou para `partner-degrading`. As corretoras recebem respostas HTTP 200 com `degraded: true` e `missing: ["partner-degrading"]` (RF-06).
+**Sintoma:** A-01 disparou para `partner-degrading`. As corretoras recebem respostas HTTP 200 com `degraded: true` e `missing: ["partner-degrading"]` (RF-04).
 
 **Por que acontece:** A parceira não falha, ela afunda acima de cinco chamadas simultâneas. O timeout de 2 s (D-03) conta como falha e abre o circuito (D-02).
 
@@ -650,30 +731,30 @@ O TTL (D-05, 3.600 s) é parâmetro de **negócio**: Aumentar economiza consulta
 
 ### 7.1. RTO e RPO por classe de dado
 
-As classes não valem o mesmo. Perder o cache custa dinheiro e latência. Perder a auditoria é infração regulatória (RF-04).
+As classes não valem o mesmo. Perder o cache custa dinheiro e latência. Perder a auditoria é infração regulatória (RF-06).
 
 **Cache de prêmio.** Vive no Redis, sem AOF nem RDB (D-06). O RPO é de até 1 h, e a perda total é aceita: toda entrada expira em 1 h (D-05) e é recomprada da parceira. O RTO é 5 min.
 
-**Registro de auditoria.** Vive no armazenamento de auditoria, que é proposta e não foi implementado na PoC. O RPO proposto é 0, porque a retenção é de 5 anos, sem regravação (RF-04). O RTO é 30 min.
+**Registro de auditoria.** Vive no armazenamento de auditoria, que é proposta e não foi implementado na PoC. O RPO proposto é 0 dentro da região (multi-AZ), porque a retenção é de 5 anos, sem regravação (RF-06). Na perda da região, o RPO passa a ser o atraso da replicação para a região secundária ([seção 7.4](#74-cenário-c-perda-do-site-ou-da-região)). O RTO é 30 min.
 
 **Estado do breaker.** Vive na memória do processo (L-02), então não há RPO. O RTO é de segundos após o reinício: o breaker reinicia fechado e reaprende com as falhas.
 
 ### 7.2. Cenário (a): o Redis inteiro se perde
 
-**O que a corretora vê:** Todas as consultas voltam às parceiras, e a latência sobe. Com `partner-degrading` acima de cinco chamadas simultâneas, ela afunda até 6 s. O timeout de 2 s (D-03) corta a espera e a corretora recebe respostas parciais (RF-06). Só recebe HTTP 503 se as três parceiras falharem.
+**O que a corretora vê:** Todas as consultas voltam às parceiras, e a latência sobe. Com `partner-degrading` acima de cinco chamadas simultâneas, ela afunda até 6 s. O timeout de 2 s (D-03) corta a espera e a corretora recebe respostas parciais (RF-04). Só recebe HTTP 503 se as três parceiras falharem.
 
 **Degrada:** Latência e completude da cotação. **Para:** Nada, enquanto ao menos uma parceira responder.
 
 **Qual efeito chega primeiro:** O colapso da `partner-degrading`, em segundos. O custo só aparece depois, de forma acumulada.
 
 - **Volume nas parceiras:** O volume multiplica por 1 ÷ (1 − hit rate). Com os 30% do P-05 são 1,43 vezes. Com 50%, o volume dobra.
-- **Custo em reais:** Cache vazio durante um dia útil inteiro custa R$ 4.320 a mais (360.000 consultas × 30% × R$ 0,04). O cache reaquece em até 1 h (TTL), então o custo real é uma fração disso: 10 horas/dia útil.
+- **Custo em reais:** Cache vazio durante um dia útil inteiro custaria R$ 4.320 a mais (360.000 consultas × 30% × R$ 0,04). O cache reaquece em até 1 h (TTL), então o custo real é uma fração disso: Em 10 h de operação por dia útil, 1 h de cache vazio custa ≈ R$ 432.
 
 **Caminho de volta:** O Redis volta vazio e reaquece sozinho. Seguir o A-02 ([seção 6.2](#62-alertas)) e não reiniciar a API (L-02, runbook da [seção 6.3](#63-runbook-breaker-da-partner-degrading-aberto)).
 
 ### 7.3. Cenário (b): uma parceira fora por 6 horas
 
-**O que a corretora vê:** Respostas HTTP 200 com `degraded: true` e a parceira em `missing` (RF-06). Entradas válidas no cache continuam servindo a parceira normalmente (RF-05).
+**O que a corretora vê:** Respostas HTTP 200 com `degraded: true` e a parceira em `missing` (RF-04). Entradas válidas no cache continuam servindo a parceira normalmente (RF-03).
 
 **Degrada:** A cotação perde uma proposta, talvez a mais barata. **Para:** Nada.
 
@@ -681,23 +762,29 @@ As classes não valem o mesmo. Perder o cache custa dinheiro e latência. Perder
 
 - **Economia:** Cada cotação sem a parceira deixa de gastar R$ 0,04 (D-02: circuito aberto não chama a parceira).
 - **Custo das requisições de prova:** No máximo 3 consultas a cada 30 s no meio aberto. São 720 ciclos × 3 × R$ 0,04 = R$ 86,40 em 6 h. É um teto, porque a primeira falha reabre o circuito.
-- **Receita em risco:** A corretora paga o preço integral (R$ 0,25) por cotação degradada? Não. Cobrança condicionada a cotação completa. Degradada = desconto ou não cobrança
+- **Receita em risco:** A regra proposta é cobrar o preço integral (R$ 0,25) só da cotação completa, e dar desconto ou isenção na degradada. Em 6 h são ≈ 72.000 cotações (12.000 por hora, [seção 3.3.2](#332-dados-importantes)), ou até R$ 18.000 de receita não cobrada, contra R$ 2.880 de consultas economizadas.
 
 **Caminho de volta:** Automático. Quando a parceira responde, o circuito fecha após três sucessos (D-02). Avisar a seguradora e a área comercial, conforme o runbook.
 
 ### 7.4. Cenário (c): perda do site ou da região
 
-**O que a corretora vê:** Nenhuma resposta. A `quotation-api` e o Redis ficam fora juntos.
+**O que a corretora vê:** Nenhuma resposta até o failover para a região secundária. A `quotation-api` e o Redis ficam fora juntos.
 
-**Degrada:** Nada. **Para:** Cotação inteira. Sem a API, não há fallback.
+**Degrada:** Nada. **Para:** Cotação inteira, até o failover. Sem a API, não há fallback.
 
 **Custo do modo parado:** Receita de cotações não entregues, R$ 0,25 por cotação, até R$ 30.000 por dia útil (120.000 cotações). Em contrapartida, não há consulta paga às parceiras.
 
+**Alvos de recuperação:**
+
+- **RTO da região:** 4 h. É proposta, a validar em exercício de recuperação.
+- **RPO da auditoria:** O atraso da replicação entre regiões, de ≈ 15 min com o S3 Replication Time Control. Dentro da região o RPO continua 0 ([seção 7.1](#71-rto-e-rpo-por-classe-de-dado)).
+
 **Caminho de volta:**
 
-1. Reconstruir a API e o Redis em outra AZ ou região ([Não há segunda região AWS oficial no Brasil. Usar multi-AZ em sa-east-1, por causa da LGPD, D-09]).
+1. Subir a API e o Redis na região secundária, na União Europeia, a partir de código de infraestrutura e imagens já replicadas ([seção 5.2](#52-modelo-de-implantação)). A transferência dos dados pessoais, que passam a ser tratados fora do país, se apoia na adequação da União Europeia reconhecida pela ANPD, e o contrato com as corretoras deve prever a região secundária.
 2. O Redis volta vazio, e o cenário (a) acontece em seguida. Reaquecer sem reiniciar nada ([seção 7.2](#72-cenário-a-o-redis-inteiro-se-perde)).
-3. Retomar a auditoria a partir do armazenamento replicado. RPO e RTO conforme a [seção 7.1](#71-rto-e-rpo-por-classe-de-dado).
+3. Retomar a auditoria a partir da réplica. RPO e RTO conforme a [seção 7.1](#71-rto-e-rpo-por-classe-de-dado).
+4. Quando a `sa-east-1` voltar, retornar ao Brasil. O cache da região secundária expira em 1 h (D-06), o que encerra o tratamento de dados pessoais fora do país.
 
 ## 8. Tecnologias, custos e pessoal (TCO)
 
@@ -709,38 +796,47 @@ O hit rate é por consulta, porque o cache é por parceira (D-04). O cache só g
 
 - **Hoje (0%).** Sem cache integrado. São 360.000 consultas por dia útil, com custo de R$ 14.400 por dia e R$ 316.800 por mês (48% da receita). Economia: R$ 0.
 - **Pessimista (5%).** O P-05 é falso e só 5% das cotações se repetem em até 1 h. São 342.000 consultas por dia útil, com custo de R$ 13.680 por dia. A economia é de R$ 720 por dia e R$ 15.840 por mês (2,4% da receita).
-- **Base (30%).** É o P-05: o TTL de 1 h cobre toda a janela de repetição assumida (RNF-03). São 252.000 consultas por dia útil, com custo de R$ 10.080 por dia. A economia é de R$ 4.320 por dia e R$ 95.040 por mês (14,4% da receita).
+- **Base (30%).** É o P-05: o TTL de 1 h cobre toda a janela de repetição assumida (RNF-05). São 252.000 consultas por dia útil, com custo de R$ 10.080 por dia. A economia é de R$ 4.320 por dia e R$ 95.040 por mês (14,4% da receita).
 - **Sensibilidade (50%).** O SAD não tem um pressuposto de repetição que chegue a este valor. Seriam necessárias mais cotações repetidas na mesma hora, ou um TTL maior (teto de 24 h, P-03), com revisão do D-05 e maior risco L-03. Fica como sensibilidade, não como previsão. Seriam 180.000 consultas por dia útil, com custo de R$ 7.200 por dia. A economia seria de R$ 7.200 por dia e R$ 158.400 por mês (24% da receita).
 
 O hit rate de cerca de 90% medido na carga da [seção 3.4](#34-resultados-após-a-intervenção) não entra nesta conta. Ele vem de poucas cotações repetidas e não descreve produção.
 
 ### 8.2. Infraestrutura acrescentada
 
-- **Redis gerenciado:** ElastiCache Redis 2 nodes cache.r6g.large 13 GiB multi-AZ ~ R$ 2.200/mês. A [seção 5.2](#52-modelo-de-implantação) estima cerca de R$ 2.200 por mês para Redis de 2 GB multi-AZ mais métricas e traces por 30 dias, valor a validar.
-- **Retenção de traces e métricas:** ~ R$ 1.200 - 1.800/mês para 30 dias.
+Os valores em dólar usam o câmbio de R$ 5,51, de 06/11/2026.
+
+- **Redis gerenciado:** 2 nós `cache.r6g.large` (13 GiB cada), multi-AZ, a ≈ R$ 2.200 a R$ 3.100 por mês. Em `us-east-1` o nó custa US$ 0,206 por hora (Redis OSS) e US$ 0,165 (Valkey). Em São Paulo o preço é maior, e a estimativa é de ≈ US$ 0,39 por hora por nó. O menor valor considera Valkey ou instância reservada. É estimativa, a validar na calculadora de preços da AWS. O nó é maior que o necessário (dezenas de MB, [seção 3.3.2](#332-dados-importantes)), então há espaço para reduzir.
+- **Retenção de traces e métricas:** ≈ R$ 1.200 a R$ 1.800 por mês. É estimativa sem fonte, que depende do serviço e do volume.
+- **Região secundária:** Sem custo fixo relevante em operação normal, além da réplica de auditoria (≈ 16 GB por ano). Durante um failover, a infraestrutura é cobrada pelo tempo de uso ([seção 5.2](#52-modelo-de-implantação)).
 - **Armazenamento de auditoria:** Ver a [seção 8.3](#83-auditoria-ano-1-e-ano-5).
+
+O total acrescentado em Redis, observabilidade e auditoria é de ≈ R$ 3.500 a R$ 5.000 por mês.
 
 ### 8.3. Auditoria: ano 1 e ano 5
 
-A unidade é a **cotação apresentada**, não a consulta comprada. O cache derruba a consulta, mas não derruba o registro: cotação servida de cache continua sendo cotação apresentada (RF-04). O hit rate, portanto, não entra nesta conta. Dimensionar pelas consultas compradas erraria para baixo por 1 ÷ (1 − hit rate), ou seja, 1,43 vez a 30%.
+A unidade é a **cotação apresentada**, não a consulta comprada. O cache derruba a consulta, mas não derruba o registro: cotação servida de cache continua sendo cotação apresentada (RF-06). O hit rate, portanto, não entra nesta conta. Dimensionar pelas consultas compradas erraria para baixo por 1 ÷ (1 − hit rate), ou seja, 1,43 vez a 30%.
 
 - **Registros por mês:** 2.640.000 cotações (120.000 × 22).
-- **Ano 1:** 31.680.000 registros guardados.
-- **Ano 5:** 158.400.000 registros guardados ao mesmo tempo, com volume constante e retenção de 5 anos sem regravação.
-- **Custo:** ~500 bytes/registro, 1 registro/cotação e S3 Standard sa-east-1 R$ 0,0405/GB-mês.
+- **Premissas:** ≈ 500 bytes por registro, 1 registro por cotação e 1 objeto por registro, em S3 Standard na `sa-east-1`. O preço é de US$ 0,0405 por GB-mês (≈ R$ 0,22) e US$ 0,007 por mil gravações.
+- **Ano 1:** 31.680.000 registros, ou ≈ 15,8 GB ao fim do ano. O custo é de ≈ R$ 1,2 mil no ano, ou ≈ R$ 105 por mês (≈ R$ 102 de gravações e ≈ R$ 3,5 de armazenamento).
+- **Ano 5:** 158.400.000 registros guardados ao mesmo tempo, ou ≈ 79,2 GB, com volume constante e retenção de 5 anos sem regravação. O custo é de ≈ R$ 1,4 mil no ano, ou ≈ R$ 120 por mês (≈ R$ 102 de gravações e ≈ R$ 18 de armazenamento).
+- **Leitura:** O armazenamento cresce 5 vezes entre o ano 1 e o ano 5, mas o que pesa são as gravações. Gravar os registros em lotes reduz esse custo.
 
 A auditoria é custo da regulação (SUSEP), não do cache. Ela existiria mesmo sem ele.
 
 ### 8.4. Pessoal
 
-- **Construir:** 2 Engenheiros Backend Go x 3 meses + 1 SRE x 1 mês.
-- **Operar:** SRE e desenvolvedor a 25% ([seção 5.2](#52-modelo-de-implantação)), com custo mensal de ~ R$ 7.000 - 8.500/mês. É quem executa os alertas e o runbook da [seção 6](#6-operação-e-gestão-de-mudanças).
+- **Construir:** 2 engenheiros back-end Go por 3 meses e 1 SRE por 1 mês, a ≈ R$ 221 mil no total (6 × R$ 29,7 mil + R$ 43,2 mil).
+- **Operar:** SRE e desenvolvedor a 25% cada, a ≈ R$ 18,2 mil por mês. É quem executa os alertas e o runbook da [seção 6](#6-operação-e-gestão-de-mudanças).
+- **Premissas:** Salário CLT de R$ 24 mil para o SRE sênior (faixa de R$ 18 a 30 mil, [JobRise 2026](https://jobrise.io/pt/blog/sre-vagas-brasil-2026/)) e de R$ 16,5 mil para o desenvolvedor back-end sênior (faixas de R$ 12,5 a 23 mil, [Robert Half 2026](https://www.roberthalf.com/br/pt/vagas-detalhes/desenvolvedora-back-end-senior/rio-de-janeiro)). O custo total é de 1,8 vez o salário, no meio da faixa de 1,7 a 1,9 do Lucro Presumido ([Contabilidade Zen](https://www.contabilidadezen.com.br/blog/custo-funcionario-por-faixa-salarial-2026/)).
 
 ### 8.5. Veredito
 
-O cache se paga se a economia mensal superar o custo mensal que ele acrescenta (Redis, traces e métricas e operação). O custo da auditoria fica de fora, porque não depende dele.
+O cache se paga se a economia mensal superar o custo mensal que ele acrescenta: infraestrutura de ≈ R$ 4 mil (Redis, observabilidade e auditoria) e operação de ≈ R$ 18 mil, ou ≈ R$ 22 mil por mês.
 
-O hit rate mínimo para empatar é: custo adicional mensal ÷ R$ 316.800. Por exemplo, só com os R$ 2.200 do Redis o ponto de equilíbrio é cerca de 0,7%.
+O hit rate mínimo para empatar é o custo adicional mensal ÷ R$ 316.800, ou seja, ≈ 7%.
 
-- **Em 30% (base):** Economia de R$ 95.040 por mês contra um custo adicional de ≈ R$ 10.9k/mês. Veredito: Em 30% hit rate economia R$ 95.040/mês, payback < 1 mês, ROI > 8x.
-- **Em 5%:** Economia de R$ 15.840 por mês. Se o custo adicional passar disso, o cache não se paga, e é isso que o A-02 ([seção 6.2](#62-alertas)) existe para detectar.
+- **Em 30% (base):** Economia de R$ 95.040 por mês contra ≈ R$ 22 mil de custo adicional, ou ≈ R$ 73 mil líquidos. Com a construção de ≈ R$ 221 mil, o payback é de ≈ 3 meses após a entrada em produção, e a economia é ≈ 4 vezes o custo.
+- **Em 5%:** Economia de R$ 15.840 por mês, abaixo dos ≈ R$ 22 mil de custo. O cache não se paga, com déficit de ≈ R$ 6 mil por mês, e é isso que o A-02 ([seção 6.2](#62-alertas)) existe para detectar.
+
+O P-05 (30%) precisa ser validado com dados reais da Prumo antes do investimento, porque o veredito muda abaixo de ≈ 7%.
