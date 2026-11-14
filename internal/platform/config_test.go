@@ -2,6 +2,7 @@ package platform
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -165,5 +166,46 @@ func TestInvalidRedisAddressFails(t *testing.T) {
 				t.Fatalf("LoadConfig accepted invalid REDIS_ADDR %q", addr)
 			}
 		})
+	}
+}
+
+func parallelEnv(values map[string]string) func(string) string {
+	return func(key string) string { return values[key] }
+}
+
+func TestParallelQuotesIsOffByDefault(t *testing.T) {
+	cfg, err := LoadConfig(parallelEnv(nil))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ParallelQuotes {
+		t.Fatal("PARALLEL_QUOTES must be off by default")
+	}
+}
+
+func TestParallelQuotesReadsTheEnvironment(t *testing.T) {
+	cases := map[string]bool{
+		"true":   true,
+		"TRUE":   true,
+		" true ": true,
+		"false":  false,
+		"False":  false,
+	}
+
+	for value, want := range cases {
+		cfg, err := LoadConfig(parallelEnv(map[string]string{"PARALLEL_QUOTES": value}))
+		if err != nil {
+			t.Fatalf("PARALLEL_QUOTES=%q: %v", value, err)
+		}
+		if cfg.ParallelQuotes != want {
+			t.Errorf("PARALLEL_QUOTES=%q gave %v, expected %v", value, cfg.ParallelQuotes, want)
+		}
+	}
+}
+
+func TestParallelQuotesRejectsAnythingElse(t *testing.T) {
+	_, err := LoadConfig(parallelEnv(map[string]string{"PARALLEL_QUOTES": "yes"}))
+	if err == nil || !strings.Contains(err.Error(), "PARALLEL_QUOTES") {
+		t.Fatalf("err = %v, expected an error naming PARALLEL_QUOTES", err)
 	}
 }

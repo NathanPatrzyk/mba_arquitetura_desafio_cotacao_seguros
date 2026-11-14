@@ -47,6 +47,7 @@ services:
       OTEL_SERVICE_NAME: quotation-api
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
       REDIS_ADDR: "redis:6379"
+      PARALLEL_QUOTES: "${PARALLEL_QUOTES:-false}"
     depends_on:
       partner-slow:
         condition: service_healthy

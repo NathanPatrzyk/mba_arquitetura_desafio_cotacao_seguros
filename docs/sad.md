@@ -642,27 +642,8 @@ Cada mecanismo aponta para o arquivo onde nasce, a biblioteca usada e o teste qu
 - **Alternativas descartadas:**
   - **Secundário em país sem adequação (ex.: EUA):** Exigiria as cláusulas-padrão contratuais da [Resolução CD/ANPD nº 19/2024](https://legismap.com.br/leis-e-normas/resolucao-cd-anpd-n-019-de-23-08-2024), assinadas com o importador sem alteração do texto.
   - **Secundário no Brasil, em outro fornecedor:** Azure (Brazil South e Brazil Southeast) ou Oracle (São Paulo e Vinhedo) mantêm tudo no país, mas exigem uma segunda stack, outro contrato e outra operação.
-  - **On-premise:** Exige hardware próprio, dois sites geograficamente
-    separados, infraestrutura de armazenamento imutável, conectividade
-    redundante e operação dos ambientes. Como referência pública, o
-    colocation de 10U em Osasco custa ≈ R$ 3.500/mês e um quarter rack
-    no Rio de Janeiro parte de ≈ R$ 1.499/mês. Quatro servidores Dell
-    PowerEdge R360, a partir de R$ 21.998 cada, representam ≈ R$ 2.444
-    mensais quando amortizados em 36 meses. O subtotal de referência
-    é ≈ R$ 7.443/mês, sem storage imutável, conectividade entre sites,
-    licenças, suporte e operação. O custo completo depende de
-    dimensionamento e cotação comercial.
-  - **Híbrido:** Mantém a operação principal na cloud e utiliza um site
-    físico no Brasil para recuperação de desastres. Considerando dois
-    servidores Dell PowerEdge R360 no site secundário e um quarter rack
-    no Rio de Janeiro, o custo adicional de referência é ≈ R$ 2.721/mês,
-    incluindo amortização do hardware em 36 meses. Não inclui
-    conectividade, armazenamento imutável, replicação, segurança
-    de rede, suporte ou operação. A contingência nacional evita a
-    transferência internacional de dados durante o failover, embora
-    essa transferência também possa ser realizada legalmente para
-    destinos reconhecidos como adequados pela ANPD. O custo completo
-    precisa ser validado por cotação.
+  - **On-premise:** Exige hardware próprio, dois sites geograficamente separados, infraestrutura de armazenamento imutável, conectividade redundante e operação dos ambientes. Como referência pública, o colocation de 10U em Osasco custa ≈ R$ 3.500/mês e um quarter rack no Rio de Janeiro parte de ≈ R$ 1.499/mês. Quatro servidores Dell PowerEdge R360, a partir de R$ 21.998 cada, representam ≈ R$ 2.444 mensais quando amortizados em 36 meses. O subtotal de referência é ≈ R$ 7.443/mês, sem storage imutável, conectividade entre sites, licenças, suporte e operação. O custo completo depende de dimensionamento e cotação comercial.
+  - **Híbrido:** Mantém a operação principal na cloud e utiliza um site físico no Brasil para recuperação de desastres. Considerando dois servidores Dell PowerEdge R360 no site secundário e um quarter rack no Rio de Janeiro, o custo adicional de referência é ≈ R$ 2.721/mês, incluindo amortização do hardware em 36 meses. Não inclui conectividade, armazenamento imutável, replicação, segurança de rede, suporte ou operação. A contingência nacional evita a transferência internacional de dados durante o failover, embora essa transferência também possa ser realizada legalmente para destinos reconhecidos como adequados pela ANPD. O custo completo precisa ser validado por cotação.
 - **Consequência ruim:** Dependência do fornecedor e custo variável com o uso. Durante um failover, dados pessoais são tratados fora do país. Isso exige previsão no contrato com as corretoras, que são as controladoras. A adequação simplifica o mecanismo de transferência, mas não dispensa os princípios, a segurança e os direitos dos titulares da LGPD. Os dados tratados na União Europeia também ficam sujeitos ao GDPR.
 - **Atenção à SUSEP:** Se a contratante for supervisionada, a contratação de nuvem segue a [Circular SUSEP nº 638/2021](https://legismap.com.br/leis-e-normas/circular-susep-n-638-de-27-07-2021), alterada pela Resolução SUSEP nº 90/2026, que considera os países e regiões onde os dados são tratados. Confirmar com o jurídico.
 - **Custo:** Redis gerenciado, retenção de traces e métricas, armazenamento de auditoria e réplica na região secundária ([seção 8](#8-tecnologias-custos-e-pessoal-tco)).

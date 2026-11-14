@@ -9,11 +9,12 @@ import (
 )
 
 type Config struct {
-	Port      string
-	Partners  []Partner
-	Tenants   []string
-	Telemetry Telemetry
-	Redis     Redis
+	Port           string
+	Partners       []Partner
+	Tenants        []string
+	Telemetry      Telemetry
+	Redis          Redis
+	ParallelQuotes bool
 }
 
 type Partner struct {
@@ -57,6 +58,9 @@ func LoadConfig(env func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	if cfg.Redis, err = parseRedis(text(env, "REDIS_ADDR", defaultRedisAddr)); err != nil {
+		return Config{}, err
+	}
+	if cfg.ParallelQuotes, err = parseParallel(env, "PARALLEL_QUOTES"); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
@@ -136,6 +140,17 @@ func parseTenants(raw string) ([]string, error) {
 		return nil, fmt.Errorf("TENANTS: at least one broker is required")
 	}
 	return tenants, nil
+}
+
+func parseParallel(env func(string) string, key string) (bool, error) {
+	switch value := strings.ToLower(strings.TrimSpace(env(key))); value {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s: %q is neither true nor false", key, value)
+	}
 }
 
 func Environment() func(string) string { return os.Getenv }

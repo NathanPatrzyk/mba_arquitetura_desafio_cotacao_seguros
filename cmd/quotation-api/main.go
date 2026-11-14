@@ -37,6 +37,12 @@ func main() {
 		log.Fatalf("cache: %v", err)
 	}
 
+	options := []quotation.Option{quotation.WithCache(cache), quotation.WithPartialFallback()}
+	if cfg.ParallelQuotes {
+		options = append(options, quotation.WithParallelQuotes())
+	}
+	log.Printf("quotation-api: parallel quotes=%t", cfg.ParallelQuotes)
+	
 	api := quotation.NewAPI(
 			quotation.NewService(
 					cfg.Partners,
@@ -44,8 +50,7 @@ func main() {
 							partner.NewClient(),
 							cfg.Partners,
 					),
-					quotation.WithCache(cache),
-					quotation.WithPartialFallback(),
+					options...,
 			),
 			cfg.Tenants,
 	)

@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sony/gobreaker/v2"
 
 	"github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/partner"
 	"github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/platform"
@@ -295,6 +298,274 @@ func TestPartialFallbackStopsWhenTheRequestIsCanceled(t *testing.T) {
 		"partner-degrading": context.Canceled,
 	}}
 	service := NewService(threePartners, quoter, WithPartialFallback())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := service.Quote(ctx, "corretora-a", validRequest())
+
+	if err == nil || errors.Is(err, ErrNoQuotes) {
+		t.Fatalf("a canceled request must fail without being reported as no quotes, got %v", err)
+	}
+}
+
+func parallelQuote(name string) partner.Quote {
+	return partner.Quote{
+		Partner:      name,
+		QuoteID:      name + "-id",
+		PremiumCents: defaultPremiums()[name],
+		Currency:     "BRL",
+	}
+}
+
+type barrierQuoter struct {
+	parties int
+	mu      sync.Mutex
+	arrived int
+	release chan struct{}
+}
+
+func newBarrierQuoter(parties int) *barrierQuoter {
+	return &barrierQuoter{parties: parties, release: make(chan struct{})}
+}
+
+func (q *barrierQuoter) Quote(ctx context.Context, p platform.Partner, _ any) (partner.Quote, error) {
+	q.mu.Lock()
+	q.arrived++
+	if q.arrived == q.parties {
+		close(q.release)
+	}
+	q.mu.Unlock()
+
+	select {
+	case <-q.release:
+		return parallelQuote(p.Name), nil
+	case <-ctx.Done():
+		return partner.Quote{}, ctx.Err()
+	case <-time.After(time.Second):
+		return partner.Quote{}, &partner.Error{Partner: p.Name, Reason: "partners were not called together"}
+	}
+}
+
+type isolationQuoter struct {
+	failing string
+	failed  chan struct{}
+}
+
+func newIsolationQuoter(failing string) *isolationQuoter {
+	return &isolationQuoter{failing: failing, failed: make(chan struct{})}
+}
+
+func (q *isolationQuoter) Quote(ctx context.Context, p platform.Partner, _ any) (partner.Quote, error) {
+	if p.Name == q.failing {
+		close(q.failed)
+		return partner.Quote{}, &partner.Error{Partner: p.Name, Reason: "timeout after 2s", Timeout: true, Cause: context.DeadlineExceeded}
+	}
+
+	select {
+	case <-q.failed:
+	case <-time.After(time.Second):
+		return partner.Quote{}, &partner.Error{Partner: p.Name, Reason: "the failing partner was not called together"}
+	}
+
+	select {
+	case <-ctx.Done():
+		return partner.Quote{}, ctx.Err()
+	case <-time.After(20 * time.Millisecond):
+		return parallelQuote(p.Name), nil
+	}
+}
+
+type panickingQuoter struct {
+	panicOn string
+}
+
+func (q *panickingQuoter) Quote(_ context.Context, p platform.Partner, _ any) (partner.Quote, error) {
+	if p.Name == q.panicOn {
+		panic("boom")
+	}
+	return parallelQuote(p.Name), nil
+}
+
+func TestParallelQuotesCallsAllPartnersTogether(t *testing.T) {
+	service := NewService(threePartners, newBarrierQuoter(3), WithParallelQuotes())
+
+	response, err := service.Quote(context.Background(), "corretora-a", validRequest())
+	if err != nil {
+		t.Fatalf("the three partners must be in flight together: %v", err)
+	}
+	if len(response.Quotes) != 3 {
+		t.Fatalf("%d quotes, expected 3", len(response.Quotes))
+	}
+}
+
+func TestParallelQuotesKeepsTheQuotesSortedByPremium(t *testing.T) {
+	service := NewService(threePartners, newBarrierQuoter(3), WithParallelQuotes())
+
+	response, err := service.Quote(context.Background(), "corretora-a", validRequest())
+	if err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+
+	expected := []string{"partner-flaky", "partner-degrading", "partner-slow"}
+	for i, name := range expected {
+		if response.Quotes[i].Partner != name {
+			t.Errorf("quote %d is from %q, expected from %q", i, response.Quotes[i].Partner, name)
+		}
+	}
+	if response.Degraded || len(response.Missing) != 0 {
+		t.Errorf("a complete response must not be degraded: degraded=%v missing=%v", response.Degraded, response.Missing)
+	}
+}
+
+func TestParallelQuotesTimeoutOfOnePartnerDoesNotCancelTheOthers(t *testing.T) {
+	service := NewService(threePartners, newIsolationQuoter("partner-flaky"), WithParallelQuotes(), WithPartialFallback())
+
+	response, err := service.Quote(context.Background(), "corretora-a", validRequest())
+	if err != nil {
+		t.Fatalf("the other partners must still answer: %v", err)
+	}
+	if !response.Degraded || len(response.Missing) != 1 || response.Missing[0] != "partner-flaky" {
+		t.Fatalf("degraded=%v missing=%v, expected only partner-flaky missing", response.Degraded, response.Missing)
+	}
+	if len(response.Quotes) != 2 {
+		t.Fatalf("%d quotes, expected 2", len(response.Quotes))
+	}
+}
+
+func TestParallelQuotesTwoPartnersFailingLeavesTheThird(t *testing.T) {
+	quoter := &scriptedQuoter{failing: map[string]error{
+		"partner-slow":  unavailableError("partner-slow"),
+		"partner-flaky": unavailableError("partner-flaky"),
+	}}
+	service := NewService(threePartners, quoter, WithParallelQuotes(), WithPartialFallback())
+
+	response, err := service.Quote(context.Background(), "corretora-a", validRequest())
+	if err != nil {
+		t.Fatalf("one partner answering is enough: %v", err)
+	}
+	if len(response.Quotes) != 1 || response.Quotes[0].Partner != "partner-degrading" {
+		t.Fatalf("quotes = %+v, expected only partner-degrading", response.Quotes)
+	}
+	if len(response.Missing) != 2 || response.Missing[0] != "partner-slow" || response.Missing[1] != "partner-flaky" {
+		t.Fatalf("missing = %v, expected [partner-slow partner-flaky] in partner order", response.Missing)
+	}
+}
+
+func TestParallelQuotesReturnsNoQuotesWhenEveryPartnerFails(t *testing.T) {
+	quoter := &scriptedQuoter{failing: allPartnersUnavailable()}
+	service := NewService(threePartners, quoter, WithParallelQuotes(), WithPartialFallback())
+
+	_, err := service.Quote(context.Background(), "corretora-a", validRequest())
+
+	if !errors.Is(err, ErrNoQuotes) {
+		t.Fatalf("err = %v, expected ErrNoQuotes", err)
+	}
+}
+
+func TestParallelQuotesWithoutFallbackReturnsTheFirstErrorInPartnerOrder(t *testing.T) {
+	quoter := &scriptedQuoter{failing: map[string]error{
+		"partner-slow":      unavailableError("partner-slow"),
+		"partner-degrading": unavailableError("partner-degrading"),
+	}}
+	service := NewService(threePartners, quoter, WithParallelQuotes())
+
+	_, err := service.Quote(context.Background(), "corretora-a", validRequest())
+
+	var failure *partner.Error
+	if !errors.As(err, &failure) || failure.Partner != "partner-slow" {
+		t.Fatalf("err = %v, expected the error of partner-slow, the first in partner order", err)
+	}
+}
+
+func TestParallelQuotesAnOpenBreakerDoesNotBlockTheOtherPartners(t *testing.T) {
+	inner := &scriptedQuoter{failing: map[string]error{"partner-flaky": unavailableError("partner-flaky")}}
+	protected := partner.NewProtectedClient(inner, threePartners)
+	service := NewService(threePartners, protected, WithParallelQuotes(), WithPartialFallback())
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		if _, err := service.Quote(ctx, "corretora-a", validRequest()); err != nil {
+			t.Fatalf("quote %d: %v", i, err)
+		}
+	}
+	if state, _ := protected.State("partner-flaky"); state != gobreaker.StateOpen {
+		t.Fatalf("breaker state = %s, expected open", state)
+	}
+
+	response, err := service.Quote(ctx, "corretora-a", validRequest())
+	if err != nil {
+		t.Fatalf("quote with the breaker open: %v", err)
+	}
+	if !response.Degraded || len(response.Missing) != 1 || response.Missing[0] != "partner-flaky" {
+		t.Fatalf("degraded=%v missing=%v, expected only partner-flaky missing", response.Degraded, response.Missing)
+	}
+	if len(response.Quotes) != 2 {
+		t.Fatalf("%d quotes, expected 2", len(response.Quotes))
+	}
+}
+
+func TestParallelQuotesCacheHitStillAvoidsThePartnerCall(t *testing.T) {
+	clock := &fixedClock{t: time.Unix(1_700_000_000, 0)}
+	quoter := newCountingQuoter()
+	service := NewService(threePartners, quoter, WithCache(newTestCache(t, newMemStore(), clock)), WithParallelQuotes())
+	ctx := context.Background()
+
+	if _, err := service.Quote(ctx, "corretora-a", validRequest()); err != nil {
+		t.Fatalf("first quote: %v", err)
+	}
+	if quoter.total() != 3 {
+		t.Fatalf("first quote made %d partner calls, expected 3", quoter.total())
+	}
+
+	clock.Advance(90 * time.Second)
+	response, err := service.Quote(ctx, "corretora-a", validRequest())
+	if err != nil {
+		t.Fatalf("second quote: %v", err)
+	}
+	if quoter.total() != 3 {
+		t.Fatalf("second quote called the partners again: %d calls", quoter.total())
+	}
+	for _, q := range response.Quotes {
+		if q.Source != partner.SourceCache {
+			t.Fatalf("quote must come from the cache: %+v", q)
+		}
+	}
+}
+
+func TestParallelQuotesAPanicInOnePartnerBecomesAMissingPartner(t *testing.T) {
+	service := NewService(threePartners, &panickingQuoter{panicOn: "partner-degrading"}, WithParallelQuotes(), WithPartialFallback())
+
+	response, err := service.Quote(context.Background(), "corretora-a", validRequest())
+	if err != nil {
+		t.Fatalf("a panic in one partner must not fail the quote: %v", err)
+	}
+	if !response.Degraded || len(response.Missing) != 1 || response.Missing[0] != "partner-degrading" {
+		t.Fatalf("degraded=%v missing=%v, expected only partner-degrading missing", response.Degraded, response.Missing)
+	}
+	if len(response.Quotes) != 2 {
+		t.Fatalf("%d quotes, expected 2", len(response.Quotes))
+	}
+}
+
+func TestParallelQuotesAPanicWithoutFallbackIsAPartnerError(t *testing.T) {
+	service := NewService(threePartners, &panickingQuoter{panicOn: "partner-degrading"}, WithParallelQuotes())
+
+	_, err := service.Quote(context.Background(), "corretora-a", validRequest())
+
+	var failure *partner.Error
+	if !errors.As(err, &failure) || failure.Partner != "partner-degrading" {
+		t.Fatalf("err = %v, expected a partner error naming partner-degrading", err)
+	}
+}
+
+func TestParallelQuotesStopsWhenTheRequestIsCanceled(t *testing.T) {
+	quoter := &scriptedQuoter{failing: map[string]error{
+		"partner-slow":      context.Canceled,
+		"partner-flaky":     context.Canceled,
+		"partner-degrading": context.Canceled,
+	}}
+	service := NewService(threePartners, quoter, WithParallelQuotes(), WithPartialFallback())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
