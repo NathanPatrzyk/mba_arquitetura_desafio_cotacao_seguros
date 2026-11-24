@@ -12,9 +12,9 @@ Na linha de base (200 requisições, 50 em voo), o p95 é de 8,01 s, o sucesso �
 
 ### 1.2. Escopo
 
-**Dentro do escopo:** A `quotation-api` e sua fronteira com as três seguradoras. A PoC implementa timeout por chamada, circuit breaker por parceira, cache de prêmio por parceira e fallback parcial.
+**Dentro do escopo:** A `quotation-api` e sua fronteira com as três seguradoras. A PoC implementa timeout por chamada, circuit breaker por parceira, cache de prêmio por parceira e fallback parcial. A paralelização das consultas está implementada atrás de uma flag, desligada por padrão ([Apêndice A](#apêndice-a-paralelização-da-agregação)).
 
-**Proposta, sem implementação:** Paralelização das consultas e os padrões retry com backoff, bulkhead, rate limiting e fila. Por isso permanecem como limites conhecidos a ausência de limite de chamadas simultâneas por parceira, o breaker na memória do processo, a invalidação do cache só por TTL e uma corretora consumindo a capacidade das demais ([seção 4.3](#43-limites-conhecidos)).
+**Proposta, sem implementação:** Os padrões retry com backoff, bulkhead, rate limiting e fila. Por isso permanecem como limites conhecidos a ausência de limite de chamadas simultâneas por parceira, o breaker na memória do processo, a invalidação do cache só por TTL e uma corretora consumindo a capacidade das demais ([seção 4.3](#43-limites-conhecidos)).
 
 **Fora do escopo:**
 
@@ -52,7 +52,7 @@ São impostas pelo enunciado e pelo ambiente, e não são escolhas desta arquite
 
 ### 1.4. Decisões
 
-São escolhas da solução, não restrições. D-01 a D-07 são defendidas na [seção 4.1](#41-decisões-arquiteturais), e D-08 e D-09 na [seção 5](#5-implementação).
+São escolhas da solução, não restrições. D-01 a D-07 são defendidas na [seção 4.1](#41-decisões-arquiteturais), D-08 e D-09 na [seção 5](#5-implementação), e D-10 no [Apêndice A](#apêndice-a-paralelização-da-agregação).
 
 - **D-01:** Escopo do circuit breaker (por parceira, por par parceira e corretora, ou global).
 - **D-02:** Limiares do breaker (falhas, janela, tempo aberto e requisições do meio aberto).
@@ -63,6 +63,7 @@ São escolhas da solução, não restrições. D-01 a D-07 são defendidas na [s
 - **D-07:** Tipo de fallback e mudança no contrato de resposta.
 - **D-08:** Biblioteca de circuit breaker (implementação própria ou `sony/gobreaker`).
 - **D-09:** Hospedagem (cloud com região primária no Brasil e região secundária de recuperação na União Europeia).
+- **D-10:** Consulta às parceiras em paralelo (em série, uma goroutine por parceira ou pool fixo de workers).
 
 ### 1.5. Pressupostos
 
@@ -562,7 +563,7 @@ Os quatro limites abaixo são conhecidos e ficam fora do escopo desta entrega.
 #### L-01: Ausência de limite de chamadas simultâneas por parceira
 
 - **Gatilho:** Rajada de carga ou indisponibilidade do Redis, que gera misses e mais consultas às seguradoras. A concorrência sobre a `partner-degrading` pode passar de 5 chamadas simultâneas.
-- **Efeito na corretora:** A latência sobe até o timeout cortar as chamadas excedentes, e mais cotações saem degradadas.
+- **Efeito na corretora:** A latência sobe até o timeout cortar as chamadas excedentes, e mais cotações saem degradadas. Com `PARALLEL_QUOTES=true` (D-10), as chamadas ficam mais concentradas no tempo e esse limite pesa mais.
 
 #### L-02: Breaker mantido na memória do processo
 
@@ -821,3 +822,83 @@ O hit rate mínimo para empatar é o custo adicional mensal ÷ R$ 316.800, ou se
 - **Em 5%:** Economia de R$ 15.840 por mês, abaixo dos ≈ R$ 22 mil de custo. O cache não se paga, com déficit de ≈ R$ 6 mil por mês, e é isso que o A-02 ([seção 6.2](#62-alertas)) existe para detectar.
 
 O P-05 (30%) precisa ser validado com dados reais da Prumo antes do investimento, porque o veredito muda abaixo de ≈ 7%.
+
+## Apêndice A. Paralelização da agregação
+
+A paralelização fica atrás da flag `PARALLEL_QUOTES`, desligada por padrão. Ela não altera as decisões D-01 a D-09 nem os resultados da [seção 3.4](#34-resultados-após-a-intervenção), medidos com a consulta em série.
+
+### A.1. Decisão
+
+#### D-10: Consulta às parceiras em paralelo
+
+- **Contexto:** Em série, a latência de uma cotação com cache miss é a soma das três parceiras. Com o timeout de 2 s por chamada (D-03), o pior caso chega a ≈ 6 s, quando as três estouram o limite. A `partner-slow` sozinha ocupa ≈ 1,5 s antes de as outras serem chamadas.
+- **Opções:** Manter em série. Uma goroutine por parceira (fan-out/fan-in). Pool fixo de workers compartilhado entre requisições.
+- **Escolha:** Uma goroutine por parceira, sincronizadas por `sync.WaitGroup` ([`internal/quotation/service.go`](/internal/quotation/service.go)). Cada goroutine passa pelo mesmo caminho da série: cache, breaker e timeout. Os resultados são gravados em um slice indexado pela posição da parceira, sem mutex, e montados depois do `Wait`. A latência passa a ser a da parceira mais lenta, e o pior caso cai de ≈ 6 s para ≈ 2 s.
+- **Garantias preservadas:**
+  - **Fallback parcial (D-07):** O timeout ou o circuito aberto de uma parceira não cancela as outras. Ela entra em `missing`.
+  - **Ordem por prêmio (RF-01):** As propostas continuam ordenadas por prêmio, sem depender de qual goroutine termina primeiro.
+  - **Sem fallback:** Devolve o primeiro erro na ordem das parceiras, não na ordem de chegada. O resultado continua determinístico.
+  - **Falha inesperada:** Uma falha inesperada na consulta a uma parceira é isolada e vira erro dessa parceira, sem derrubar o processo.
+  - **Cancelamento:** O cancelamento da requisição propaga para todas as chamadas.
+- **Alternativas descartadas:** Manter a série deixa o p95 do miss preso à soma das três parceiras. O pool fixo limitaria a concorrência total, mas não por parceira, e isso não resolve o L-01. Com três parceiras fixas, o custo de três goroutines por requisição é desprezível.
+- **Consequência ruim:** As requisições terminam mais rápido e a mesma carga chega às parceiras mais concentrada no tempo. A `partner-degrading` fica mais exposta ao limite de 5 chamadas simultâneas, e o L-01 fica mais relevante. Em produção, a paralelização deveria vir junto com um limite de concorrência por parceira.
+- **Por que atrás de flag:** Os números da seção 3.4 continuam reproduzíveis, e a flag serve de rollback sem deploy de código.
+
+### A.2. Resultados com a paralelização ligada
+
+#### Relatório do `make reproduce`
+
+```bash
+make down && PARALLEL_QUOTES=true make reproduce
+```
+
+```text
+baseline — 10 requests, 1 in flight, 21:18:11 UTC to 21:18:19 UTC
+  success        10 of 10 (100%)
+  latency        p50 197ms   p95 1.68s   p99 1.68s   max 1.68s
+  throughput     1.2 req/s in 8.41s
+
+load — 200 requests, 50 in flight, 21:18:19 UTC to 21:18:19 UTC
+  success        200 of 200 (100%)
+  latency        p50 7ms   p95 202ms   p99 221ms   max 226ms
+  throughput     804.5 req/s in 248ms
+
+baseline → load
+  p95 latency    1.68s → 202ms   0.1x
+  max latency    1.68s → 226ms   0.1x
+  success        100% → 100%
+  throughput     1.2 → 804.5 req/s
+```
+
+Legenda: O p95 do baseline cai de 2,04 s para 1,68 s. A carga mantém 100% de sucesso e p95 de 202 ms.
+
+#### make test
+
+```bash
+make test
+```
+
+```text
+ok      github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/cmd/loadgen             2.536s
+ok      github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/cmd/partner-mock        0.470s
+?       github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/cmd/quotation-api       [no test files]
+ok      github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/partner        1.113s
+ok      github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/platform       1.474s
+ok      github.com/GuilhermeOliveira591/mba_arquitetura_desafio_cotacao_seguros/internal/quotation      1.927s
+```
+
+Legenda: Testes passando com a paralelização, incluindo os `TestParallelQuotes*`, que cobrem a ordem por prêmio, o timeout isolado, o breaker aberto, o acerto de cache, a falha inesperada e o cancelamento.
+
+### A.3. Leitura dos números
+
+| Medida                   | Em série (seção 3.4) | Paralelo    |
+| ------------------------ | -------------------- | ----------- |
+| p95 do baseline          | 2,04 s               | 1,68 s      |
+| Duração do baseline      | 10,02 s              | 8,41 s      |
+| p95 da carga             | 198 ms               | 202 ms      |
+| Sucesso (baseline/carga) | 100% / 100%          | 100% / 100% |
+
+- **Cache frio:** O ganho está na requisição que consulta as três parceiras. Em série, ela soma a `partner-slow` (≈ 1,5 s) e as demais, chegando a 2,04 s. Em paralelo, custa só a mais lenta: 1,68 s, dentro da faixa da `partner-slow` (1,5 s ± 200 ms).
+- **Carga:** Com a taxa de acerto do cache próxima de 90%, quase nenhuma requisição chega às parceiras, e a paralelização não traz ganho.
+- **Ressalva:** Com 10 requisições no baseline, o p95 coincide com o máximo e corresponde a uma única requisição.
+- **Conclusão:** A paralelização reduz a latência do miss, não a da carga com cache aquecido. O ganho cresce quando o hit rate cai, como no cenário (a) da [seção 7.2](#72-cenário-a-o-redis-inteiro-se-perde), em que o Redis se perde e toda cotação vira miss.
